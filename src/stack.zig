@@ -10,7 +10,8 @@ pub const page_size = std.heap.page_size_min;
 threadlocal var altstack_installed: bool = false;
 threadlocal var altstack_mem: ?[]u8 = null;
 var signal_handler_refcount: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
-var old_sigaction: posix.Sigaction = undefined;
+var old_sigsegv_action: posix.Sigaction = undefined;
+var old_sigbus_action: posix.Sigaction = undefined;
 
 // Platform-specific macros for declaring future mprotect permissions
 // NetBSD PROT_MPROTECT: Required when PaX MPROTECT is enabled to allow permission escalation
@@ -349,11 +350,11 @@ pub fn setupStackGrowth() !void {
             .flags = posix.SA.SIGINFO | posix.SA.ONSTACK | posix.SA.NODEFER,
         };
 
-        posix.sigaction(posix.SIG.SEGV, &sa, &old_sigaction);
+        posix.sigaction(posix.SIG.SEGV, &sa, &old_sigsegv_action);
 
         // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
         if (builtin.os.tag.isDarwin()) {
-            posix.sigaction(posix.SIG.BUS, &sa, null);
+            posix.sigaction(posix.SIG.BUS, &sa, &old_sigbus_action);
         }
     }
 }
@@ -391,15 +392,9 @@ pub fn cleanupStackGrowth() void {
         const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
         if (prev_refcount == 1) {
             // We were the last thread - restore the old signal handlers
-            posix.sigaction(posix.SIG.SEGV, &old_sigaction, null);
+            posix.sigaction(posix.SIG.SEGV, &old_sigsegv_action, null);
             if (builtin.os.tag.isDarwin()) {
-                // Note: we don't save the old SIGBUS handler, just restore default
-                var default_sa = posix.Sigaction{
-                    .handler = .{ .handler = posix.SIG.DFL },
-                    .mask = posix.sigemptyset(),
-                    .flags = 0,
-                };
-                posix.sigaction(posix.SIG.BUS, &default_sa, null);
+                posix.sigaction(posix.SIG.BUS, &old_sigbus_action, null);
             }
         }
     }
