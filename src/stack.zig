@@ -622,9 +622,7 @@ test "Stack: automatic growth via SIGSEGV" {
     var step_count: usize = 0;
     while (!coro.finished) {
         step_count += 1;
-        if (step_count % 10 == 0) {
-            std.log.info("TEST: Step {d}", .{step_count});
-        }
+        std.log.info("TEST: Step {d}", .{step_count});
         coro.step();
     }
     std.log.info("TEST: Coroutine finished after {d} steps", .{step_count});
