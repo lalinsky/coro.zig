@@ -70,13 +70,16 @@ jobs:
 
     - name: Run tests (native)
       if: matrix.run == 'native'
-      run: |
-        if [[ "$RUNNER_OS" == "macOS" ]]; then
-          lldb -b -o run -o 'thread backtrace all' -o quit -- ./zig-out/bin/test
-        else
-          ./zig-out/bin/test
-        fi
+      run: ./zig-out/bin/test
       timeout-minutes: 5
+
+    - name: Show crash logs (macOS)
+      if: failure() && runner.os == 'macOS'
+      run: |
+        echo "Checking for crash reports..."
+        ls -lt ~/Library/Logs/DiagnosticReports/ | head -20 || true
+        echo "Most recent crash report:"
+        cat "$(ls -t ~/Library/Logs/DiagnosticReports/*.crash 2>/dev/null | head -1)" 2>/dev/null || echo "No crash reports found"
 
     - name: Install QEMU
       if: matrix.run == 'qemu'
