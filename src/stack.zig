@@ -387,13 +387,25 @@ pub fn cleanupStackGrowth() void {
     }
 }
 
+/// Extract fault address from siginfo_t in a platform-agnostic way
+inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
+    return @intFromPtr(switch (builtin.os.tag) {
+        .linux => info.fields.sigfault.addr,
+        .macos, .ios, .tvos, .watchos, .visionos => info.addr,
+        .freebsd, .dragonfly => info.addr,
+        .netbsd => info.info.reason.fault.addr,
+        .solaris, .illumos => info.reason.fault.addr,
+        else => @compileError("Stack growth not supported on this platform"),
+    });
+}
+
 /// SIGSEGV signal handler for automatic stack growth.
 /// This handler checks if the fault is within a coroutine's uncommitted stack region
 /// and extends the stack if so. Real segmentation faults are re-raised.
 fn sigsegvHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque) callconv(.c) void {
     _ = sig;
 
-    const fault_addr = @intFromPtr(info.fields.sigfault.addr);
+    const fault_addr = getFaultAddress(info);
 
     // Get current_context from coroutines module
     const current_ctx = coroutines.current_context orelse {
