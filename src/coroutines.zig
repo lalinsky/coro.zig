@@ -16,7 +16,7 @@ pub const Context = switch (builtin.cpu.arch) {
         rsp: u64,
         rbp: u64,
         rip: u64,
-        fiber_data: u64 = 0, // Windows only (TEB offset 0x20)
+        fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
         stack_info: StackInfo,
 
         pub const stack_alignment = 16;
@@ -26,7 +26,7 @@ pub const Context = switch (builtin.cpu.arch) {
         fp: u64,  // x29 (frame pointer)
         lr: u64,  // x30 (link register)
         pc: u64,
-        fiber_data: u64 = 0, // Windows only (TEB offset 0x20)
+        fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
         stack_info: StackInfo,
 
         pub const stack_alignment = 16;
@@ -35,7 +35,7 @@ pub const Context = switch (builtin.cpu.arch) {
         sp: u64,
         fp: u64,
         pc: u64,
-        fiber_data: u64 = 0, // Windows only (TEB offset 0x20)
+        fiber_data: if (builtin.os.tag == .windows) u64 else void = if (builtin.os.tag == .windows) 0 else {}, // Windows only (TEB offset 0x20)
         stack_info: StackInfo,
 
         pub const stack_alignment = 16;
