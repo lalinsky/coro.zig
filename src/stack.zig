@@ -5,12 +5,16 @@ const windows = std.os.windows;
 
 pub const page_size = std.heap.page_size_min;
 
-// NetBSD PROT_MPROTECT macro for declaring future mprotect permissions
-// On NetBSD, you cannot make memory protection MORE permissive than the initial mmap() protection.
-// Use PROT_MPROTECT to declare which permissions you may enable later via mprotect(2).
-// See: https://man.netbsd.org/mmap.2
-inline fn PROT_MPROTECT(prot: u32) u32 {
-    return prot << 3;
+// Platform-specific macros for declaring future mprotect permissions
+// NetBSD PROT_MPROTECT: Required when PaX MPROTECT is enabled to allow permission escalation
+// FreeBSD PROT_MAX: Optional security feature to restrict maximum permissions
+// See: https://man.netbsd.org/mmap.2 and https://man.freebsd.org/mmap.2
+inline fn PROT_MAX_FUTURE(prot: u32) u32 {
+    return switch (builtin.os.tag) {
+        .netbsd => prot << 3, // PROT_MPROTECT
+        .freebsd => prot << 16, // PROT_MAX
+        else => 0,
+    };
 }
 
 // Windows ntdll.dll functions for stack management
@@ -114,11 +118,8 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     };
 
     // Reserve address space with PROT_NONE (like Linux POC for lazy commit)
-    // On NetBSD, we must declare future permissions upfront using PROT_MPROTECT
-    const prot_flags = if (builtin.os.tag == .netbsd)
-        posix.PROT.NONE | PROT_MPROTECT(posix.PROT.READ | posix.PROT.WRITE)
-    else
-        posix.PROT.NONE;
+    // On NetBSD/FreeBSD, we must declare future permissions upfront for security policies
+    const prot_flags = posix.PROT.NONE | PROT_MAX_FUTURE(posix.PROT.READ | posix.PROT.WRITE);
 
     const allocation = posix.mmap(
         null, // Address hint (null for system to choose)
