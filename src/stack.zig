@@ -100,7 +100,6 @@ pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) 
         try stackAllocPosix(info, maximum_size, committed_size);
     }
 
-    // Register stack with valgrind
     if (builtin.mode == .Debug and builtin.valgrind_support) {
         const stack_slice: [*]u8 = @ptrFromInt(info.limit);
         info.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. info.base - info.limit]);
@@ -117,14 +116,14 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
         return error.OutOfMemory;
     };
 
-    // Reserve address space with PROT_NONE (like Linux POC for lazy commit)
+    // Reserve address space with PROT_NONE
     // On NetBSD/FreeBSD, we must declare future permissions upfront for security policies
     const prot_flags = posix.PROT.NONE | PROT_MAX_FUTURE(posix.PROT.READ | posix.PROT.WRITE);
 
     const allocation = posix.mmap(
         null, // Address hint (null for system to choose)
         size,
-        prot_flags, // Reserved but not accessible (with future perms on NetBSD)
+        prot_flags,
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1, // File descriptor (not applicable)
         0, // Offset within the file (not applicable)
@@ -150,18 +149,17 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
 
     // Stack layout (grows downward from high to low addresses):
     // [guard_page (PROT_NONE)][uncommitted (PROT_NONE)][committed (READ|WRITE)]
-    // ^                                                 ^                       ^
-    // allocation_ptr                                    limit                   base (allocation_ptr + allocation_len)
+    // ^                                                ^                       ^
+    // allocation_ptr                                   limit                   base (allocation_ptr + allocation_len)
     info.* = .{
         .allocation_ptr = allocation.ptr,
-        .base = stack_top, // Top of stack (high address)
-        .limit = initial_commit_start, // Bottom of committed region
+        .base = stack_top,
+        .limit = initial_commit_start,
         .allocation_len = allocation.len,
     };
 }
 
 pub fn stackFree(info: StackInfo) void {
-    // Deregister stack from valgrind
     if (builtin.mode == .Debug and builtin.valgrind_support) {
         if (info.valgrind_stack_id != 0) {
             std.valgrind.stackDeregister(info.valgrind_stack_id);
@@ -187,7 +185,6 @@ pub fn stackExtend(info: *StackInfo) error{StackOverflow}!void {
         try stackExtendPosix(info);
     }
 
-    // Notify valgrind of stack size change
     if (builtin.mode == .Debug and builtin.valgrind_support) {
         if (info.valgrind_stack_id != 0) {
             const stack_slice: [*]u8 = @ptrFromInt(info.limit);
@@ -197,7 +194,7 @@ pub fn stackExtend(info: *StackInfo) error{StackOverflow}!void {
 }
 
 /// Extend the committed stack region by a growth factor (1.5x current size).
-/// Commits in 64KB chunks. For testing stack growth mechanism.
+/// Commits in 64KB chunks.
 fn stackExtendPosix(info: *StackInfo) error{StackOverflow}!void {
     const chunk_size = 64 * 1024;
     const growth_factor_num = 3;
@@ -220,7 +217,7 @@ fn stackExtendPosix(info: *StackInfo) error{StackOverflow}!void {
         return error.StackOverflow;
     }
 
-    // Commit the memory region (like Linux POC signal handler)
+    // Commit the memory region
     const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
     const commit_size = info.limit - commit_start;
     const addr: [*]align(page_size) u8 = @ptrFromInt(commit_start);
@@ -264,9 +261,9 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
 
     info.* = .{
         .allocation_ptr = @ptrCast(@alignCast(initial_teb.StackAllocationBase)),
-        .base = stack_base, // Top of stack (high address)
-        .limit = stack_limit, // Bottom of committed region
-        .allocation_len = stack_base - alloc_base, // Total reserved size
+        .base = stack_base,
+        .limit = stack_limit,
+        .allocation_len = stack_base - alloc_base,
     };
 }
 
@@ -277,7 +274,7 @@ fn stackFreeWindows(info: StackInfo) void {
 /// Windows handles stack growth automatically via PAGE_GUARD mechanism
 /// when using RtlCreateUserStack. This function should never be called.
 fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
-    unreachable; // Windows automatically grows the stack via PAGE_GUARD
+    unreachable;
 }
 
 test "Stack: alloc/free" {
