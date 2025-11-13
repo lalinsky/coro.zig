@@ -8,8 +8,6 @@ const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-pub const DEFAULT_STACK_SIZE = if (builtin.os.tag == .windows) 2 * 1024 * 1024 else 256 * 1024; // 2MB on Windows, 256KB elsewhere - TODO: investigate why Windows needs much more stack
-
 pub const stack_alignment = 16;
 pub const Stack = []align(stack_alignment) u8;
 pub const StackPtr = [*]align(stack_alignment) u8;
