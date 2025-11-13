@@ -312,13 +312,18 @@ pub fn setupStackGrowth() !void {
     // Windows handles stack growth automatically
     if (builtin.os.tag == .windows) return;
 
+    std.log.info("setupStackGrowth: Starting", .{});
+
     const altstack_size = switch (builtin.os.tag) {
         .linux => std.os.linux.SIGSTKSZ,
         else => std.c.SIGSTKSZ,
     };
 
+    std.log.info("setupStackGrowth: SIGSTKSZ = {d}", .{altstack_size});
+
     // Setup alternate stack for this thread if not already done
     if (!altstack_installed) {
+        std.log.info("setupStackGrowth: Allocating altstack", .{});
         const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
         errdefer std.heap.page_allocator.free(mem);
 
@@ -328,13 +333,18 @@ pub fn setupStackGrowth() !void {
             .size = altstack_size,
         };
 
+        std.log.info("setupStackGrowth: Calling sigaltstack", .{});
         posix.sigaltstack(&stack, null) catch |err| {
+            std.log.err("setupStackGrowth: sigaltstack failed: {}", .{err});
             std.heap.page_allocator.free(mem);
             return err;
         };
 
         altstack_mem = mem;
         altstack_installed = true;
+        std.log.info("setupStackGrowth: Altstack installed successfully", .{});
+    } else {
+        std.log.info("setupStackGrowth: Altstack already installed", .{});
     }
 
     // Install global signal handler (once per process)
@@ -343,6 +353,7 @@ pub fn setupStackGrowth() !void {
     errdefer _ = signal_handler_refcount.fetchSub(1, .release);
 
     if (prev_refcount == 0) {
+        std.log.info("setupStackGrowth: Installing SIGSEGV handler", .{});
         var sa = posix.Sigaction{
             .handler = .{ .sigaction = sigsegvHandler },
             .mask = posix.sigemptyset(),
@@ -350,7 +361,12 @@ pub fn setupStackGrowth() !void {
         };
 
         posix.sigaction(posix.SIG.SEGV, &sa, &old_sigaction);
+        std.log.info("setupStackGrowth: SIGSEGV handler installed successfully", .{});
+    } else {
+        std.log.info("setupStackGrowth: SIGSEGV handler already installed (refcount now: {d})", .{prev_refcount + 1});
     }
+
+    std.log.info("setupStackGrowth: Complete", .{});
 }
 
 /// Cleanup stack growth handler state for this thread.
@@ -409,20 +425,32 @@ inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
 fn sigsegvHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque) callconv(.c) void {
     _ = sig;
 
+    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Handler entered\n") catch {};
+
     const fault_addr = getFaultAddress(info);
+
+    var buf: [100]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "SIGSEGV: Fault at 0x{x}\n", .{fault_addr}) catch "SIGSEGV: Fault address unknown\n";
+    _ = posix.write(posix.STDERR_FILENO, msg) catch {};
 
     // Get current_context from coroutines module
     const current_ctx = coroutines.current_context orelse {
         // Not in a coroutine context - this is a real segfault
+        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: No current context\n") catch {};
         abortOnSegfault(fault_addr);
     };
+
+    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Have context\n") catch {};
 
     const stack_info = &current_ctx.stack_info;
 
     // Check if allocation_ptr is null (not our stack)
     if (@intFromPtr(stack_info.allocation_ptr) == 0) {
+        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Null allocation_ptr\n") catch {};
         abortOnSegfault(fault_addr);
     }
+
+    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Checking stack region\n") catch {};
 
     // Check if fault is in uncommitted stack region
     // Stack layout: [guard_page][uncommitted][committed]
@@ -432,15 +460,19 @@ fn sigsegvHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque
 
     if (fault_addr >= uncommitted_start and fault_addr < uncommitted_end) {
         // Fault is in uncommitted region - extend the stack
+        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Extending stack\n") catch {};
         stackExtendPosix(stack_info) catch {
             // Extension failed - abort
+            _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Extension failed\n") catch {};
             abortOnStackOverflow(fault_addr);
         };
         // Stack extended successfully - return to resume execution
+        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Stack extended, returning\n") catch {};
         return;
     }
 
     // Fault is not in our stack region - this is a real segfault
+    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Not in stack region\n") catch {};
     abortOnSegfault(fault_addr);
 }
 
@@ -534,13 +566,14 @@ test "Stack: automatic growth via SIGSEGV" {
     // Skip on Windows - automatic growth works differently
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    // Skip on macOS - crashes
-    if (builtin.os.tag == .macos) return error.SkipZigTest;
+    std.log.info("TEST: Starting automatic growth test", .{});
 
     // Setup signal handler for this thread
+    std.log.info("TEST: Setting up stack growth", .{});
     try setupStackGrowth();
     defer cleanupStackGrowth();
 
+    std.log.info("TEST: Creating coroutine", .{});
     var parent_context: coroutines.Context = undefined;
     var coro: coroutines.Coroutine = .{
         .parent_context_ptr = &parent_context,
@@ -550,11 +583,12 @@ test "Stack: automatic growth via SIGSEGV" {
     // Allocate a stack with small initial commit but larger maximum
     const maximum_size = 256 * 1024;
     const initial_commit = 4096; // Very small initial commit
+    std.log.info("TEST: Allocating stack (max={d}, commit={d})", .{ maximum_size, initial_commit });
     try stackAlloc(&coro.context.stack_info, maximum_size, initial_commit);
     defer stackFree(coro.context.stack_info);
 
     const initial_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
-    std.log.info("Initial committed: {d} bytes", .{initial_committed});
+    std.log.info("TEST: Initial committed: {d} bytes", .{initial_committed});
 
     // Recursive function that will exceed initial commit and trigger stack growth
     const RecursiveFn = struct {
@@ -579,17 +613,27 @@ test "Stack: automatic growth via SIGSEGV" {
 
     const Closure = coroutines.Closure(RecursiveFn.start);
     var closure = Closure.init(.{100}); // Recurse 100 times with 1KB per frame = ~100KB
+
+    std.log.info("TEST: Setting up coroutine", .{});
     coro.setup(&Closure.start, &closure);
 
     // Run coroutine - should trigger automatic stack growth
+    std.log.info("TEST: Running coroutine (should trigger stack growth)", .{});
+    var step_count: usize = 0;
     while (!coro.finished) {
+        step_count += 1;
+        if (step_count % 10 == 0) {
+            std.log.info("TEST: Step {d}", .{step_count});
+        }
         coro.step();
     }
+    std.log.info("TEST: Coroutine finished after {d} steps", .{step_count});
 
     // Verify stack grew beyond initial commit
     const final_committed = coro.context.stack_info.base - coro.context.stack_info.limit;
-    std.log.info("Final committed: {d} bytes", .{final_committed});
-    std.log.info("Stack grew by: {d} bytes", .{final_committed - initial_committed});
+    std.log.info("TEST: Final committed: {d} bytes", .{final_committed});
+    std.log.info("TEST: Stack grew by: {d} bytes", .{final_committed - initial_committed});
 
     try std.testing.expect(final_committed > initial_committed);
+    std.log.info("TEST: Complete - stack growth verified", .{});
 }
