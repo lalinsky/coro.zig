@@ -542,7 +542,7 @@ test "Coroutine: basic" {
         .context = undefined,
     };
     try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
-    defer stackFree(&coro.context.stack_info);
+    defer stackFree(coro.context.stack_info);
 
     const Fn = struct {
         fn sum(_: *Coroutine, a: u32, b: u32) u32 {
@@ -569,14 +569,14 @@ test "Coroutine: message passing" {
         .context = undefined,
     };
     try stackAlloc(&coro1.context.stack_info, 64 * 1024, 4096);
-    defer stackFree(&coro1.context.stack_info);
+    defer stackFree(coro1.context.stack_info);
 
     var coro2: Coroutine = .{
         .parent_context_ptr = &parent_context,
         .context = undefined,
     };
     try stackAlloc(&coro2.context.stack_info, 64 * 1024, 4096);
-    defer stackFree(&coro2.context.stack_info);
+    defer stackFree(coro2.context.stack_info);
 
     // Simple single-slot channel
     const Channel = struct {

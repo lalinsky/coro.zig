@@ -14,6 +14,51 @@ pub const StackInfo = extern struct {
     valgrind_stack_id: usize = 0,
 };
 
+pub const StackAllocator = struct {
+    ptr: ?*anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        alloc: *const fn (
+            ptr: ?*anyopaque,
+            info: *StackInfo,
+            maximum_size: usize,
+            committed_size: usize,
+        ) error{OutOfMemory}!void,
+
+        free: *const fn (
+            ptr: ?*anyopaque,
+            info: StackInfo,
+        ) void,
+    };
+
+    pub fn alloc(self: StackAllocator, info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
+        return self.vtable.alloc(self.ptr, info, maximum_size, committed_size);
+    }
+
+    pub fn free(self: StackAllocator, info: StackInfo) void {
+        return self.vtable.free(self.ptr, info);
+    }
+};
+
+const default_vtable = StackAllocator.VTable{
+    .alloc = defaultAlloc,
+    .free = defaultFree,
+};
+
+fn defaultAlloc(_: ?*anyopaque, info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
+    return stackAlloc(info, maximum_size, committed_size);
+}
+
+fn defaultFree(_: ?*anyopaque, info: StackInfo) void {
+    return stackFree(info);
+}
+
+pub var default_stack_allocator = StackAllocator{
+    .ptr = null,
+    .vtable = &default_vtable,
+};
+
 pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
     if (builtin.os.tag == .windows) {
         try stackAllocWindows(info, maximum_size, committed_size);
@@ -78,7 +123,7 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     };
 }
 
-pub fn stackFree(info: *StackInfo) void {
+pub fn stackFree(info: StackInfo) void {
     // Deregister stack from valgrind
     if (builtin.mode == .Debug and builtin.valgrind_support) {
         if (info.valgrind_stack_id != 0) {
@@ -93,7 +138,7 @@ pub fn stackFree(info: *StackInfo) void {
     }
 }
 
-fn stackFreePosix(info: *StackInfo) void {
+fn stackFreePosix(info: StackInfo) void {
     const allocation: []align(page_size) u8 = info.allocation_ptr[0..info.allocation_len];
     posix.munmap(allocation);
 }
@@ -227,7 +272,7 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
     };
 }
 
-fn stackFreeWindows(info: *StackInfo) void {
+fn stackFreeWindows(info: StackInfo) void {
     windows.VirtualFree(info.allocation_ptr, 0, windows.MEM_RELEASE);
 }
 
@@ -292,7 +337,7 @@ test "Stack: alloc/free" {
     const committed_size = 1024;
     var stack: StackInfo = undefined;
     try stackAlloc(&stack, maximum_size, committed_size);
-    defer stackFree(&stack);
+    defer stackFree(stack);
 
     // Verify allocation size is at least the requested size (rounded to power of 2 with min 2 pages)
     try std.testing.expect(stack.allocation_len >= maximum_size);
@@ -322,7 +367,7 @@ test "Stack: fully committed" {
     const size = 64 * 1024;
     var stack: StackInfo = undefined;
     try stackAlloc(&stack, size, size);
-    defer stackFree(&stack);
+    defer stackFree(stack);
 
     // Verify allocation succeeded
     try std.testing.expect(stack.allocation_len >= size);
@@ -338,7 +383,7 @@ test "Stack: extend" {
     const initial_commit = 64 * 1024;
     var stack: StackInfo = undefined;
     try stackAlloc(&stack, maximum_size, initial_commit);
-    defer stackFree(&stack);
+    defer stackFree(stack);
 
     const initial_limit = stack.limit;
     const initial_committed = stack.base - stack.limit;
