@@ -70,7 +70,12 @@ jobs:
 
     - name: Run tests (native)
       if: matrix.run == 'native'
-      run: ./zig-out/bin/test
+      run: |
+        if [[ "$RUNNER_OS" == "macOS" ]]; then
+          lldb -b -o run -o 'thread backtrace all' -o quit -- ./zig-out/bin/test
+        else
+          ./zig-out/bin/test
+        fi
       timeout-minutes: 5
 
     - name: Install QEMU
