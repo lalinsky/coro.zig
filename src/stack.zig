@@ -14,17 +14,14 @@ pub const StackPosix = struct {
     pub fn alloc(maximum_size: usize, committed_size: usize) error{OutOfMemory}!*@This() {
         _ = committed_size; // Ignored on POSIX - we commit everything
 
-        const size = std.math.ceilPowerOfTwo(usize, maximum_size) catch |err| {
+        // Ensure we allocate at least 2 pages (guard + usable space)
+        const min_pages = 2;
+        const adjusted_size = @max(maximum_size, page_size * min_pages);
+
+        const size = std.math.ceilPowerOfTwo(usize, adjusted_size) catch |err| {
             std.log.err("Failed to calculate stack size: {}", .{err});
             return error.OutOfMemory;
         };
-
-        // Ensure we have enough space for guard page and metadata
-        const min_size = page_size + @sizeOf(@This());
-        if (size < min_size) {
-            std.log.err("Stack size ({}) is too small (minimum: {})", .{ size, min_size });
-            return error.OutOfMemory;
-        }
 
         const allocation = posix.mmap(
             null, // Address hint (null for system to choose)
@@ -91,17 +88,14 @@ pub const StackWindows = struct {
     valgrind_stack_id: usize,
 
     pub fn alloc(maximum_size: usize, committed_size: usize) error{OutOfMemory}!*@This() {
-        const max_size = std.math.ceilPowerOfTwo(usize, maximum_size) catch |err| {
+        // Ensure we allocate at least 2 pages (guard + usable space)
+        const min_pages = 2;
+        const adjusted_size = @max(maximum_size, page_size * min_pages);
+
+        const max_size = std.math.ceilPowerOfTwo(usize, adjusted_size) catch |err| {
             std.log.err("Failed to calculate maximum stack size: {}", .{err});
             return error.OutOfMemory;
         };
-
-        // Ensure we have enough space for guard page and metadata
-        const min_size = page_size + @sizeOf(@This());
-        if (max_size < min_size) {
-            std.log.err("Maximum size ({}) is too small (minimum: {})", .{ max_size, min_size });
-            return error.OutOfMemory;
-        }
 
         // Round committed size up to page boundary
         const commit_size = std.mem.alignForward(usize, committed_size, page_size);
