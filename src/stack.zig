@@ -593,6 +593,8 @@ test "Stack: automatic growth via SIGSEGV" {
     // Recursive function that will exceed initial commit and trigger stack growth
     const RecursiveFn = struct {
         fn recurse(c: *coroutines.Coroutine, depth: u32, target: u32) u32 {
+            std.log.info("TEST: Recursing {d} times", .{depth});
+
             // Allocate stack space to force growth
             var buffer: [1024]u8 = undefined;
             @memset(&buffer, @intCast(depth & 0xFF));
