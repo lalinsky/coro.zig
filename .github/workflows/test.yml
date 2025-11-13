@@ -6,6 +6,9 @@ on:
     tags:
   pull_request:
 
+env:
+  TEST_LOG_CAPTURE: "false"
+
 jobs:
   test:
     strategy:
