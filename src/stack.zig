@@ -412,25 +412,53 @@ inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
     });
 }
 
+/// Invoke the previous signal handler or use default behavior.
+/// This allows proper signal handler chaining instead of unconditionally aborting.
+fn invokePreviousHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*const anyopaque) noreturn {
+    // Get the appropriate old sigaction based on signal number
+    const old_sa = if (sig == posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
+
+    // Check handler type and invoke appropriately
+    switch (old_sa.handler) {
+        .handler => |h| {
+            if (h == posix.SIG.DFL or h == posix.SIG.IGN) {
+                // Restore the previous handler and re-raise the signal
+                // We must restore the handler first, otherwise the signal comes back to us
+                posix.sigaction(@intCast(sig), old_sa, null);
+                _ = posix.raise(sig) catch {};
+            } else {
+                // Call the previous simple handler
+                h(sig);
+            }
+        },
+        .sigaction => |sa| {
+            // Call the previous sigaction handler
+            sa(sig, info, ctx);
+        },
+    }
+
+    // If we reach here, either raise failed or the handler returned
+    // In either case, abort
+    posix.abort();
+}
+
 /// Signal handler for automatic stack growth (SIGSEGV on Linux/BSD, SIGBUS on macOS).
 /// This handler checks if the fault is within a coroutine's uncommitted stack region
-/// and extends the stack if so. Real faults are re-raised.
-fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque) callconv(.c) void {
-    _ = sig;
-
+/// and extends the stack if so. Real faults are propagated to the previous handler.
+fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*const anyopaque) callconv(.c) void {
     const fault_addr = getFaultAddress(info);
 
     // Get current_context from coroutines module
     const current_ctx = coroutines.current_context orelse {
-        // Not in a coroutine context - this is a real fault
-        abortOnSegfault(fault_addr);
+        // Not in a coroutine context - propagate to previous handler
+        invokePreviousHandler(sig, info, ctx);
     };
 
     const stack_info = &current_ctx.stack_info;
 
     // Check if allocation_ptr is null (not our stack)
     if (@intFromPtr(stack_info.allocation_ptr) == 0) {
-        abortOnSegfault(fault_addr);
+        invokePreviousHandler(sig, info, ctx);
     }
 
     // Check if fault is in uncommitted stack region
@@ -442,24 +470,15 @@ fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopa
     if (fault_addr >= uncommitted_start and fault_addr < uncommitted_end) {
         // Fault is in uncommitted region - extend the stack
         stackExtendPosix(stack_info) catch {
-            // Extension failed - abort
+            // Extension failed - this is a stack overflow
             abortOnStackOverflow(fault_addr);
         };
         // Stack extended successfully - return to resume execution
         return;
     }
 
-    // Fault is not in our stack region - this is a real fault
-    abortOnSegfault(fault_addr);
-}
-
-/// Abort with diagnostic message on real segmentation fault.
-/// Uses async-signal-safe write() to stderr in a single call.
-fn abortOnSegfault(fault_addr: usize) noreturn {
-    var buf: [100]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "SIGSEGV: Segmentation fault at address 0x{x}\n", .{fault_addr}) catch "SIGSEGV: Segmentation fault\n";
-    _ = posix.write(posix.STDERR_FILENO, msg) catch {};
-    posix.abort();
+    // Fault is not in our stack region - propagate to previous handler
+    invokePreviousHandler(sig, info, ctx);
 }
 
 /// Abort with diagnostic message on stack overflow.
