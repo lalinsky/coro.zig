@@ -347,7 +347,7 @@ pub fn setupStackGrowth() !void {
         var sa = posix.Sigaction{
             .handler = .{ .sigaction = stackFaultHandler },
             .mask = posix.sigemptyset(),
-            .flags = posix.SA.SIGINFO | posix.SA.ONSTACK | posix.SA.NODEFER,
+            .flags = posix.SA.SIGINFO | posix.SA.ONSTACK,
         };
 
         posix.sigaction(posix.SIG.SEGV, &sa, &old_sigsegv_action);
@@ -418,23 +418,23 @@ fn invokePreviousHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*const 
     // Get the appropriate old sigaction based on signal number
     const old_sa = if (sig == posix.SIG.SEGV) &old_sigsegv_action else &old_sigbus_action;
 
-    // Check handler type and invoke appropriately
-    switch (old_sa.handler) {
-        .handler => |h| {
-            if (h == posix.SIG.DFL or h == posix.SIG.IGN) {
-                // Restore the previous handler and re-raise the signal
-                // We must restore the handler first, otherwise the signal comes back to us
-                posix.sigaction(@intCast(sig), old_sa, null);
-                _ = posix.raise(sig) catch {};
-            } else {
-                // Call the previous simple handler
-                h(sig);
-            }
-        },
-        .sigaction => |sa| {
-            // Call the previous sigaction handler
-            sa(sig, info, ctx);
-        },
+    // Check if the old handler had SA_SIGINFO flag set
+    if ((old_sa.flags & posix.SA.SIGINFO) != 0) {
+        // Previous handler was a sigaction-style handler
+        const sa = old_sa.handler.sigaction;
+        sa(sig, info, ctx);
+    } else {
+        // Previous handler was a simple handler (or SIG_DFL/SIG_IGN)
+        const h = old_sa.handler.handler;
+        if (h == posix.SIG.DFL or h == posix.SIG.IGN) {
+            // Restore the previous handler and re-raise the signal
+            // We must restore the handler first, otherwise the signal comes back to us
+            posix.sigaction(@intCast(sig), old_sa, null);
+            _ = posix.raise(sig) catch {};
+        } else {
+            // Call the previous simple handler
+            h(sig);
+        }
     }
 
     // If we reach here, either raise failed or the handler returned
