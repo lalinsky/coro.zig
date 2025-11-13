@@ -221,3 +221,17 @@ test "Stack: alloc/free" {
     try std.testing.expect(stack.base >= @intFromPtr(stack.allocation.ptr));
     try std.testing.expect(stack.base < @intFromPtr(stack.allocation.ptr) + stack.allocation.len);
 }
+
+test "Stack: fully committed" {
+    const size = 64 * 1024;
+    const stack = try Stack.alloc(size, size);
+    defer stack.free();
+
+    // Verify allocation succeeded
+    try std.testing.expect(stack.allocation.len >= size);
+    try std.testing.expect(stack.base > stack.limit);
+
+    // Verify base is within the allocation
+    try std.testing.expect(stack.base >= @intFromPtr(stack.allocation.ptr));
+    try std.testing.expect(stack.base < @intFromPtr(stack.allocation.ptr) + stack.allocation.len);
+}
