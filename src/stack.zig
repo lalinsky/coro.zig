@@ -9,6 +9,7 @@ pub const StackPosix = struct {
     allocation: []align(page_size) u8,
     base: usize,
     limit: usize,
+    valgrind_stack_id: usize,
 
     pub fn alloc(maximum_size: usize, committed_size: usize) error{OutOfMemory}!*@This() {
         _ = committed_size; // Ignored on POSIX - we commit everything
@@ -60,12 +61,25 @@ pub const StackPosix = struct {
             .allocation = allocation,
             .base = self_ptr, // Top of stack (high address, where metadata is)
             .limit = @intFromPtr(allocation.ptr) + page_size, // Bottom of usable stack (just after guard)
+            .valgrind_stack_id = 0,
         };
+
+        // Register stack with valgrind
+        if (builtin.mode == .Debug and builtin.valgrind_support) {
+            const stack_slice: [*]u8 = @ptrFromInt(self.limit);
+            self.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. self.base - self.limit]);
+        }
 
         return self;
     }
 
     pub fn free(self: *@This()) void {
+        // Deregister stack from valgrind
+        if (builtin.mode == .Debug and builtin.valgrind_support) {
+            if (self.valgrind_stack_id != 0) {
+                std.valgrind.stackDeregister(self.valgrind_stack_id);
+            }
+        }
         posix.munmap(self.allocation);
     }
 };
@@ -74,6 +88,7 @@ pub const StackWindows = struct {
     allocation: []align(page_size) u8,
     base: usize,
     limit: usize,
+    valgrind_stack_id: usize,
 
     pub fn alloc(maximum_size: usize, committed_size: usize) error{OutOfMemory}!*@This() {
         const max_size = std.math.ceilPowerOfTwo(usize, maximum_size) catch |err| {
@@ -155,12 +170,25 @@ pub const StackWindows = struct {
             .allocation = allocation,
             .base = self_ptr, // Top of stack (high address, where metadata is)
             .limit = committed_start, // Bottom of committed stack (just after guard)
+            .valgrind_stack_id = 0,
         };
+
+        // Register stack with valgrind
+        if (builtin.mode == .Debug and builtin.valgrind_support) {
+            const stack_slice: [*]u8 = @ptrFromInt(self.limit);
+            self.valgrind_stack_id = std.valgrind.stackRegister(stack_slice[0 .. self.base - self.limit]);
+        }
 
         return self;
     }
 
     pub fn free(self: *@This()) void {
+        // Deregister stack from valgrind
+        if (builtin.mode == .Debug and builtin.valgrind_support) {
+            if (self.valgrind_stack_id != 0) {
+                std.valgrind.stackDeregister(self.valgrind_stack_id);
+            }
+        }
         windows.VirtualFree(self.allocation.ptr, 0, windows.MEM_RELEASE);
     }
 };
