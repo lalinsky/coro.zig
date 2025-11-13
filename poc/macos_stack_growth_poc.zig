@@ -53,15 +53,22 @@ fn sigsegvHandler(_: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque) 
 }
 
 fn recursiveFunc(depth: u32, buffer_ptr: *[1024]u8) u32 {
-    // Write to buffer to ensure it's on stack
+    // Write to buffer to ensure it's on stack and prevent optimization
     @memset(buffer_ptr, @intCast(depth & 0xFF));
 
+    // Prevent tail call optimization by using the buffer in a meaningful way
+    const sum = buffer_ptr[0] +% buffer_ptr[512] +% buffer_ptr[1023];
+
     if (depth == 0) {
-        return buffer_ptr[0];
+        return sum;
     }
 
+    // Allocate on stack and recurse (volatile to prevent optimization)
     var next_buffer: [1024]u8 = undefined;
-    return recursiveFunc(depth - 1, &next_buffer);
+    const result = recursiveFunc(depth - 1, &next_buffer);
+
+    // Use both buffers to prevent optimization
+    return result +% sum;
 }
 
 pub fn main() !void {
@@ -127,12 +134,20 @@ pub fn main() !void {
     std.debug.print("SIGSEGV handler installed\n", .{});
     std.debug.print("Attempting to use {d} KB of stack...\n\n", .{STACK_SIZE / 1024});
 
-    // Try to use the stack by recursing
-    // Each call uses ~1KB, so 200 calls = ~200KB (needs stack growth)
+    // Test 1: Direct access to uncommitted region
+    std.debug.print("Test 1: Writing to uncommitted region (should trigger SIGSEGV)...\n", .{});
+    const uncommitted_addr = initial_start - PAGE_SIZE; // One page below committed region
+    const uncommitted_ptr: *u8 = @ptrFromInt(uncommitted_addr);
+    uncommitted_ptr.* = 42; // This should trigger SIGSEGV and commit the page
+    std.debug.print("  ✓ Write succeeded, value: {d}\n", .{uncommitted_ptr.*});
+    std.debug.print("  ✓ SIGSEGV faults so far: {d}\n\n", .{g_faults_handled});
+
+    // Test 2: Try to use the stack by recursing
+    std.debug.print("Test 2: Recursive function calls...\n", .{});
     var buffer: [1024]u8 = undefined;
     const result = recursiveFunc(200, &buffer);
 
-    std.debug.print("\n✓ Success!\n", .{});
+    std.debug.print("\n✓ All tests passed!\n", .{});
     std.debug.print("Result: {d}\n", .{result});
     std.debug.print("SIGSEGV faults handled: {d}\n", .{g_faults_handled});
     std.debug.print("Final committed: {d} KB\n", .{(stack_top - g_current_limit) / 1024});
