@@ -5,6 +5,14 @@ const windows = std.os.windows;
 
 pub const page_size = std.heap.page_size_min;
 
+// NetBSD PROT_MPROTECT macro for declaring future mprotect permissions
+// On NetBSD, you cannot make memory protection MORE permissive than the initial mmap() protection.
+// Use PROT_MPROTECT to declare which permissions you may enable later via mprotect(2).
+// See: https://man.netbsd.org/mmap.2
+inline fn PROT_MPROTECT(prot: u32) u32 {
+    return prot << 3;
+}
+
 // Windows ntdll.dll functions for stack management
 const INITIAL_TEB = extern struct {
     OldStackBase: windows.PVOID,
@@ -106,10 +114,16 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
     };
 
     // Reserve address space with PROT_NONE (like Linux POC for lazy commit)
+    // On NetBSD, we must declare future permissions upfront using PROT_MPROTECT
+    const prot_flags = if (builtin.os.tag == .netbsd)
+        posix.PROT.NONE | PROT_MPROTECT(posix.PROT.READ | posix.PROT.WRITE)
+    else
+        posix.PROT.NONE;
+
     const allocation = posix.mmap(
         null, // Address hint (null for system to choose)
         size,
-        posix.PROT.NONE, // Reserved but not accessible
+        prot_flags, // Reserved but not accessible (with future perms on NetBSD)
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1, // File descriptor (not applicable)
         0, // Offset within the file (not applicable)
