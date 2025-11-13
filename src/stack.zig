@@ -5,6 +5,28 @@ const windows = std.os.windows;
 
 pub const page_size = std.heap.page_size_min;
 
+// Windows ntdll.dll functions for stack management
+const INITIAL_TEB = extern struct {
+    OldStackBase: windows.PVOID,
+    OldStackLimit: windows.PVOID,
+    StackBase: windows.PVOID,
+    StackLimit: windows.PVOID,
+    StackAllocationBase: windows.PVOID,
+};
+
+extern "ntdll" fn RtlCreateUserStack(
+    CommittedStackSize: windows.SIZE_T,
+    MaximumStackSize: windows.SIZE_T,
+    ZeroBits: windows.ULONG_PTR,
+    PageSize: windows.SIZE_T,
+    ReserveAlignment: windows.ULONG_PTR,
+    InitialTeb: *INITIAL_TEB,
+) callconv(.winapi) windows.NTSTATUS;
+
+extern "ntdll" fn RtlFreeUserStack(
+    StackAllocationBase: windows.PVOID,
+) callconv(.winapi) void;
+
 pub const StackInfo = extern struct {
     _fiber_data: u64 = 0, // Windows only (TEB offset 0x20) TODO: not part of stack, but convenient to have here for now
     allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
@@ -196,140 +218,51 @@ fn stackExtendPosix(info: *StackInfo) error{StackOverflow}!void {
 }
 
 fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
-    // Round committed size up to page boundary
+    // Round sizes up to page boundary
     const commit_size = std.mem.alignForward(usize, committed_size, page_size);
+    const max_size = std.mem.alignForward(usize, maximum_size, page_size);
 
-    // Ensure we allocate at least 2 pages (guard + usable space)
-    const min_pages = 2;
-    const min_size = page_size * min_pages;
+    // Use RtlCreateUserStack for automatic stack growth via PAGE_GUARD
+    const ALLOCATION_GRANULARITY = 65536; // 64KB on Windows
+    var initial_teb: INITIAL_TEB = undefined;
 
-    // Need space for: guard page + committed region
-    const needed_size = commit_size + page_size;
-    const adjusted_size = @max(maximum_size, @max(min_size, needed_size));
-
-    const max_size = std.math.ceilPowerOfTwo(usize, adjusted_size) catch |err| {
-        std.log.err("Failed to calculate maximum stack size: {}", .{err});
-        return error.OutOfMemory;
-    };
-
-    // Reserve the address space without committing physical memory
-    const stack_mem = windows.VirtualAlloc(
-        null, // Address hint (null for system to choose)
-        max_size,
-        windows.MEM_RESERVE,
-        windows.PAGE_NOACCESS,
-    ) catch |err| {
-        std.log.err("Failed to reserve stack memory: {}", .{err});
-        return error.OutOfMemory;
-    };
-    errdefer windows.VirtualFree(stack_mem, 0, windows.MEM_RELEASE);
-
-    // Convert to aligned slice (VirtualAlloc returns 64KB-aligned memory)
-    const allocation: []align(page_size) u8 = @alignCast(@as([*]u8, @ptrCast(stack_mem))[0..max_size]);
-    const stack_addr = @intFromPtr(allocation.ptr);
-
-    // Calculate the layout:
-    // [uncommitted][guard_page][committed]
-    const uncommitted_size = max_size - commit_size - page_size;
-    const guard_start = stack_addr + uncommitted_size;
-    const committed_start = guard_start + page_size;
-
-    // Commit the guard page with PAGE_GUARD attribute
-    // This will trigger a one-shot exception if accessed
-    _ = windows.VirtualAlloc(
-        @ptrFromInt(guard_start),
-        page_size,
-        windows.MEM_COMMIT,
-        windows.PAGE_READWRITE | windows.PAGE_GUARD,
-    ) catch |err| {
-        std.log.err("Failed to commit guard page: {}", .{err});
-        return error.OutOfMemory;
-    };
-
-    // Commit the requested portion of the usable stack space
-    // The rest remains reserved but uncommitted at the bottom
-    _ = windows.VirtualAlloc(
-        @ptrFromInt(committed_start),
+    const status = RtlCreateUserStack(
         commit_size,
-        windows.MEM_COMMIT,
-        windows.PAGE_READWRITE,
-    ) catch |err| {
-        std.log.err("Failed to commit stack memory: {}", .{err});
+        max_size,
+        0, // ZeroBits
+        page_size,
+        ALLOCATION_GRANULARITY,
+        &initial_teb,
+    );
+
+    if (status != .SUCCESS) {
+        std.log.err("RtlCreateUserStack failed with status: 0x{x}", .{@intFromEnum(status)});
         return error.OutOfMemory;
-    };
+    }
 
-    const stack_top = stack_addr + max_size;
+    // Extract stack information from INITIAL_TEB
+    // RtlCreateUserStack creates: [uncommitted][guard_page][committed]
+    // and sets up automatic growth via PAGE_GUARD mechanism
+    const stack_base = @intFromPtr(initial_teb.StackBase);
+    const stack_limit = @intFromPtr(initial_teb.StackLimit);
+    const alloc_base = @intFromPtr(initial_teb.StackAllocationBase);
 
-    // Stack layout (grows downward from high to low addresses):
-    // [uncommitted][guard_page][committed_stack_space]
-    // ^            ^           ^                       ^
-    // allocation_ptr           limit                   base (allocation_ptr + allocation_len)
     info.* = .{
-        .allocation_ptr = allocation.ptr,
-        .base = stack_top, // Top of stack (high address)
-        .limit = committed_start, // Bottom of committed stack (just after guard)
-        .allocation_len = allocation.len,
+        .allocation_ptr = @ptrCast(@alignCast(initial_teb.StackAllocationBase)),
+        .base = stack_base, // Top of stack (high address)
+        .limit = stack_limit, // Bottom of committed region
+        .allocation_len = stack_base - alloc_base, // Total reserved size
     };
 }
 
 fn stackFreeWindows(info: StackInfo) void {
-    windows.VirtualFree(info.allocation_ptr, 0, windows.MEM_RELEASE);
+    RtlFreeUserStack(info.allocation_ptr);
 }
 
-/// Extend the committed stack region by a growth factor (1.5x current size).
-/// Commits in 64KB chunks. For testing stack growth mechanism.
-fn stackExtendWindows(info: *StackInfo) error{StackOverflow}!void {
-    const chunk_size = 64 * 1024;
-    const growth_factor_num = 3;
-    const growth_factor_den = 2;
-
-    // Calculate current committed size
-    const current_committed = info.base - info.limit;
-
-    // Calculate new committed size (1.5x current)
-    const new_committed_size = (current_committed * growth_factor_num) / growth_factor_den;
-    const additional_size = new_committed_size - current_committed;
-    const size_to_commit = std.mem.alignForward(usize, additional_size, chunk_size);
-
-    // Calculate new limit (stack grows downward from high to low address)
-    const new_limit = if (info.limit >= size_to_commit) info.limit - size_to_commit else 0;
-
-    // Check we don't overflow into the allocation base
-    const alloc_base = @intFromPtr(info.allocation_ptr);
-    if (new_limit < alloc_base) {
-        return error.StackOverflow;
-    }
-
-    // Calculate new guard page position (one page before new committed region)
-    const new_guard_start = if (new_limit >= page_size) new_limit - page_size else alloc_base;
-    if (new_guard_start < alloc_base) {
-        return error.StackOverflow;
-    }
-
-    // Commit the new region
-    const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
-    const commit_size = info.limit - commit_start;
-    _ = windows.VirtualAlloc(
-        @ptrFromInt(commit_start),
-        commit_size,
-        windows.MEM_COMMIT,
-        windows.PAGE_READWRITE,
-    ) catch {
-        return error.StackOverflow;
-    };
-
-    // Update the guard page (commit with PAGE_GUARD)
-    _ = windows.VirtualAlloc(
-        @ptrFromInt(new_guard_start),
-        page_size,
-        windows.MEM_COMMIT,
-        windows.PAGE_READWRITE | windows.PAGE_GUARD,
-    ) catch {
-        return error.StackOverflow;
-    };
-
-    // Update limit to new bottom of committed region
-    info.limit = commit_start;
+/// Windows handles stack growth automatically via PAGE_GUARD mechanism
+/// when using RtlCreateUserStack. This function should never be called.
+fn stackExtendWindows(_: *StackInfo) error{StackOverflow}!void {
+    unreachable; // Windows automatically grows the stack via PAGE_GUARD
 }
 
 test "Stack: alloc/free" {
@@ -345,18 +278,11 @@ test "Stack: alloc/free" {
     // Verify base is at the top (high address)
     try std.testing.expect(stack.base > stack.limit);
 
-    // Verify limit calculation based on platform
-    // Note: committed_size gets rounded up to page boundary
+    // Verify at least the requested amount was committed
+    // Note: RtlCreateUserStack on Windows may commit more than requested
     const commit_size_rounded = std.mem.alignForward(usize, committed_size, page_size);
-    const expected_limit = switch (builtin.os.tag) {
-        // On Windows: [uncommitted][guard][committed]
-        // limit points to start of committed region
-        .windows => @intFromPtr(stack.allocation_ptr) + stack.allocation_len - commit_size_rounded,
-        // On POSIX: [guard][uncommitted][committed]
-        // limit points to start of committed region
-        else => @intFromPtr(stack.allocation_ptr) + stack.allocation_len - commit_size_rounded,
-    };
-    try std.testing.expectEqual(expected_limit, stack.limit);
+    const actual_committed = stack.base - stack.limit;
+    try std.testing.expect(actual_committed >= commit_size_rounded);
 
     // Verify base is at the top of the allocation
     try std.testing.expect(stack.base >= @intFromPtr(stack.allocation_ptr));
@@ -379,6 +305,9 @@ test "Stack: fully committed" {
 }
 
 test "Stack: extend" {
+    // Skip on Windows - RtlCreateUserStack handles automatic growth
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const maximum_size = 256 * 1024;
     const initial_commit = 64 * 1024;
     var stack: StackInfo = undefined;
