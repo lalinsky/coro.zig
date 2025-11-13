@@ -7,23 +7,16 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const Stack = @import("stack.zig").Stack;
-
-const WindowsTIB = extern struct {
-    fiber_data: u64, // TEB offset 0x20
-    deallocation_stack: u64, // TEB offset 0x1478
-    stack_base: u64, // TEB offset 0x08
-    stack_limit: u64, // TEB offset 0x10
-};
-
-const ExtraContext = if (builtin.os.tag == .windows) WindowsTIB else void;
+const StackInfo = @import("stack.zig").StackInfo;
+const stackAlloc = @import("stack.zig").stackAlloc;
+const stackFree = @import("stack.zig").stackFree;
 
 pub const Context = switch (builtin.cpu.arch) {
     .x86_64 => extern struct {
         rsp: u64,
         rbp: u64,
         rip: u64,
-        extra: ExtraContext,
+        stack_info: StackInfo,
 
         pub const stack_alignment = 16;
     },
@@ -32,7 +25,7 @@ pub const Context = switch (builtin.cpu.arch) {
         fp: u64,  // x29 (frame pointer)
         lr: u64,  // x30 (link register)
         pc: u64,
-        extra: ExtraContext,
+        stack_info: StackInfo,
 
         pub const stack_alignment = 16;
     },
@@ -40,7 +33,7 @@ pub const Context = switch (builtin.cpu.arch) {
         sp: u64,
         fp: u64,
         pc: u64,
-        extra: ExtraContext,
+        stack_info: StackInfo,
 
         pub const stack_alignment = 16;
     },
@@ -49,30 +42,27 @@ pub const Context = switch (builtin.cpu.arch) {
 
 pub const EntryPointFn = fn () callconv(.naked) noreturn;
 
-pub fn initContext(stack_ptr: usize, entry_point: *const EntryPointFn) Context {
+pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPointFn) void {
     assert(stack_ptr % Context.stack_alignment == 0);
-    return switch (builtin.cpu.arch) {
-        .x86_64 => .{
-            .rsp = stack_ptr,
-            .rbp = 0,
-            .rip = @intFromPtr(entry_point),
-            .extra = undefined,
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            ctx.rsp = stack_ptr;
+            ctx.rbp = 0;
+            ctx.rip = @intFromPtr(entry_point);
         },
-        .aarch64 => .{
-            .sp = stack_ptr,
-            .fp = 0,
-            .lr = 0,
-            .pc = @intFromPtr(entry_point),
-            .extra = undefined,
+        .aarch64 => {
+            ctx.sp = stack_ptr;
+            ctx.fp = 0;
+            ctx.lr = 0;
+            ctx.pc = @intFromPtr(entry_point);
         },
-        .riscv64 => .{
-            .sp = stack_ptr,
-            .fp = 0,
-            .pc = @intFromPtr(entry_point),
-            .extra = undefined,
+        .riscv64 => {
+            ctx.sp = stack_ptr;
+            ctx.fp = 0;
+            ctx.pc = @intFromPtr(entry_point);
         },
         else => @compileError("unsupported architecture"),
-    };
+    }
 }
 
 /// Context switching function using C calling convention.
@@ -453,7 +443,6 @@ fn coroEntry() callconv(.naked) noreturn {
 pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
-    stack: *Stack,
     finished: bool = false,
 
     /// Step into the coroutine
@@ -495,8 +484,7 @@ pub const Coroutine = struct {
         };
 
         // Stack grows downward: base (high address) -> limit (low address)
-        const stack = self.stack;
-        var stack_top = stack.base;
+        var stack_top = self.context.stack_info.base;
 
         // Copy our wrapper to stack (allocate downward from top)
         stack_top = std.mem.alignBackward(usize, stack_top - @sizeOf(CoroutineData), @alignOf(CoroutineData));
@@ -512,15 +500,7 @@ pub const Coroutine = struct {
         entry.context = data;
 
         // Initialize the context with the entry point
-        self.context = initContext(stack_top, &coroEntry);
-
-        // Initialize Windows TIB fields for the coroutine stack
-        if (builtin.os.tag == .windows) {
-            self.context.extra.fiber_data = 0; // No fiber data for our coroutines
-            self.context.extra.stack_base = stack.base; // Top of stack (high address)
-            self.context.extra.stack_limit = stack.limit; // Bottom of committed stack (low address)
-            self.context.extra.deallocation_stack = @intFromPtr(stack.allocation.ptr); // Allocation base
-        }
+        setupContext(&self.context, stack_top, &coroEntry);
     }
 };
 
@@ -555,14 +535,14 @@ pub fn Closure(func: anytype) type {
 }
 
 test "Coroutine: basic" {
-    const stack = try Stack.alloc(64 * 1024, 4096);
-    defer stack.free();
-
     var parent_context: Context = undefined;
+
     var coro: Coroutine = .{
         .parent_context_ptr = &parent_context,
-        .stack = stack,
+        .context = undefined,
     };
+    try stackAlloc(&coro.context.stack_info, 64 * 1024, 4096);
+    defer stackFree(&coro.context.stack_info);
 
     const Fn = struct {
         fn sum(_: *Coroutine, a: u32, b: u32) u32 {
@@ -582,12 +562,21 @@ test "Coroutine: basic" {
 }
 
 test "Coroutine: message passing" {
-    const stack1 = try Stack.alloc(64 * 1024, 4096);
-    defer stack1.free();
-    const stack2 = try Stack.alloc(64 * 1024, 4096);
-    defer stack2.free();
-
     var parent_context: Context = undefined;
+
+    var coro1: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+    try stackAlloc(&coro1.context.stack_info, 64 * 1024, 4096);
+    defer stackFree(&coro1.context.stack_info);
+
+    var coro2: Coroutine = .{
+        .parent_context_ptr = &parent_context,
+        .context = undefined,
+    };
+    try stackAlloc(&coro2.context.stack_info, 64 * 1024, 4096);
+    defer stackFree(&coro2.context.stack_info);
 
     // Simple single-slot channel
     const Channel = struct {
@@ -612,9 +601,6 @@ test "Coroutine: message passing" {
 
     var chan_to_receiver = Channel{};
     var chan_to_sender = Channel{};
-
-    var coro1: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack1 };
-    var coro2: Coroutine = .{ .parent_context_ptr = &parent_context, .stack = stack2 };
 
     const sender = struct {
         fn run(coro: *Coroutine, send_chan: *Channel, recv_chan: *Channel) void {
