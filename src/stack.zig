@@ -314,7 +314,7 @@ pub fn setupStackGrowth() !void {
 
     // Setup alternate stack for this thread if not already done
     if (!altstack_installed) {
-        const altstack_size = 8 * 1024; // 8KB alternate stack (plenty for signal handler)
+        const altstack_size = posix.system.SIGSTKSZ;
         const mem = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(page_size), altstack_size);
         errdefer std.heap.page_allocator.free(mem);
 
