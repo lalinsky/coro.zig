@@ -18,12 +18,16 @@ pub const StackPosix = struct {
             return error.OutOfMemory;
         };
 
-        // Allocate extra space for the guard page at the bottom of the stack
-        const total_size = size + page_size;
+        // Ensure we have enough space for guard page and metadata
+        const min_size = page_size + @sizeOf(@This());
+        if (size < min_size) {
+            std.log.err("Stack size ({}) is too small (minimum: {})", .{ size, min_size });
+            return error.OutOfMemory;
+        }
 
         const allocation = posix.mmap(
             null, // Address hint (null for system to choose)
-            total_size,
+            size,
             posix.PROT.READ | posix.PROT.WRITE,
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
             -1, // File descriptor (not applicable)
@@ -77,22 +81,26 @@ pub const StackWindows = struct {
             return error.OutOfMemory;
         };
 
-        // Round committed size up to page boundary
-        const commit_size = std.mem.alignForward(usize, committed_size, page_size);
-
-        // Ensure committed size doesn't exceed maximum size
-        if (commit_size > max_size) {
-            std.log.err("Committed size ({}) exceeds maximum size ({})", .{ commit_size, max_size });
+        // Ensure we have enough space for guard page and metadata
+        const min_size = page_size + @sizeOf(@This());
+        if (max_size < min_size) {
+            std.log.err("Maximum size ({}) is too small (minimum: {})", .{ max_size, min_size });
             return error.OutOfMemory;
         }
 
-        // Reserve address space for maximum size plus guard page
-        const total_size = max_size + page_size;
+        // Round committed size up to page boundary
+        const commit_size = std.mem.alignForward(usize, committed_size, page_size);
+
+        // Ensure committed size doesn't exceed available space (max_size - guard - metadata)
+        if (commit_size > max_size - page_size) {
+            std.log.err("Committed size ({}) exceeds available space ({})", .{ commit_size, max_size - page_size });
+            return error.OutOfMemory;
+        }
 
         // Reserve the address space without committing physical memory
         const stack_mem = windows.VirtualAlloc(
             null, // Address hint (null for system to choose)
-            total_size,
+            max_size,
             windows.MEM_RESERVE,
             windows.PAGE_NOACCESS,
         ) catch |err| {
@@ -102,12 +110,12 @@ pub const StackWindows = struct {
         errdefer windows.VirtualFree(stack_mem, 0, windows.MEM_RELEASE);
 
         // Convert to aligned slice (VirtualAlloc returns 64KB-aligned memory)
-        const allocation: []align(page_size) u8 = @alignCast(@as([*]u8, @ptrCast(stack_mem))[0..total_size]);
+        const allocation: []align(page_size) u8 = @alignCast(@as([*]u8, @ptrCast(stack_mem))[0..max_size]);
         const stack_addr = @intFromPtr(allocation.ptr);
 
         // Calculate the layout:
         // [uncommitted][guard_page][committed][metadata]
-        const uncommitted_size = max_size - commit_size;
+        const uncommitted_size = max_size - commit_size - page_size;
         const guard_start = stack_addr + uncommitted_size;
         const committed_start = guard_start + page_size;
 
@@ -136,7 +144,7 @@ pub const StackWindows = struct {
         };
 
         // Place the Stack metadata at the top of the allocation (high address)
-        const self_ptr = std.mem.alignBackward(usize, stack_addr + total_size - @sizeOf(@This()), @alignOf(@This()));
+        const self_ptr = std.mem.alignBackward(usize, stack_addr + max_size - @sizeOf(@This()), @alignOf(@This()));
         const self: *@This() = @ptrFromInt(self_ptr);
 
         // Stack layout (grows downward from high to low addresses):
@@ -168,8 +176,9 @@ test "Stack: alloc/free" {
     const stack = try Stack.alloc(maximum_size, committed_size);
     defer stack.free();
 
-    // Verify allocation size includes guard page
-    try std.testing.expectEqual(page_size + maximum_size, stack.allocation.len);
+    // Verify allocation size is rounded to power of 2
+    const expected_size = std.math.ceilPowerOfTwo(usize, maximum_size) catch unreachable;
+    try std.testing.expectEqual(expected_size, stack.allocation.len);
 
     // Verify base is at the top (high address)
     try std.testing.expect(stack.base > stack.limit);
@@ -180,7 +189,7 @@ test "Stack: alloc/free" {
     const expected_limit = switch (builtin.os.tag) {
         // On Windows: [uncommitted][guard][committed][metadata]
         // limit points to start of committed region
-        .windows => @intFromPtr(stack.allocation.ptr) + (maximum_size - commit_size_rounded) + page_size,
+        .windows => @intFromPtr(stack.allocation.ptr) + expected_size - commit_size_rounded,
         // On POSIX: [guard][committed][metadata]
         // limit points to start after guard page
         else => @intFromPtr(stack.allocation.ptr) + page_size,
