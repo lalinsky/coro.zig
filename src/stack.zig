@@ -40,7 +40,6 @@ extern "ntdll" fn RtlFreeUserStack(
 ) callconv(.winapi) void;
 
 pub const StackInfo = extern struct {
-    _fiber_data: u64 = 0, // Windows only (TEB offset 0x20) TODO: not part of stack, but convenient to have here for now
     allocation_ptr: [*]align(page_size) u8, // deallocation_stack on Windows (TEB offset 0x1478)
     base: usize, // stack_base on Windows (TEB offset 0x08)
     limit: usize, // stack_limit on Windows (TEB offset 0x10)
