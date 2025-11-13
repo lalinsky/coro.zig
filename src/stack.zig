@@ -329,10 +329,7 @@ pub fn setupStackGrowth() !void {
             .size = altstack_size,
         };
 
-        posix.sigaltstack(&stack, null) catch |err| {
-            std.heap.page_allocator.free(mem);
-            return err;
-        };
+        try posix.sigaltstack(&stack, null);
 
         altstack_mem = mem;
         altstack_installed = true;
@@ -341,8 +338,6 @@ pub fn setupStackGrowth() !void {
     // Install global signal handler (once per process)
     // Increment refcount; if this is the first caller, install the handler
     const prev_refcount = signal_handler_refcount.fetchAdd(1, .acquire);
-    errdefer _ = signal_handler_refcount.fetchSub(1, .release);
-
     if (prev_refcount == 0) {
         var sa = posix.Sigaction{
             .handler = .{ .sigaction = stackFaultHandler },
@@ -387,15 +382,15 @@ pub fn cleanupStackGrowth() void {
         }
 
         altstack_installed = false;
+    }
 
-        // Decrement refcount; if this was the last thread, uninstall the handler
-        const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
-        if (prev_refcount == 1) {
-            // We were the last thread - restore the old signal handlers
-            posix.sigaction(posix.SIG.SEGV, &old_sigsegv_action, null);
-            if (builtin.os.tag.isDarwin()) {
-                posix.sigaction(posix.SIG.BUS, &old_sigbus_action, null);
-            }
+    // Decrement refcount; if this was the last thread, uninstall the handler
+    const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
+    if (prev_refcount == 1) {
+        // We were the last thread - restore the old signal handlers
+        posix.sigaction(posix.SIG.SEGV, &old_sigsegv_action, null);
+        if (builtin.os.tag.isDarwin()) {
+            posix.sigaction(posix.SIG.BUS, &old_sigbus_action, null);
         }
     }
 }
