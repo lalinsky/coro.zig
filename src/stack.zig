@@ -12,8 +12,6 @@ pub const StackPosix = struct {
     valgrind_stack_id: usize,
 
     pub fn alloc(maximum_size: usize, committed_size: usize) error{OutOfMemory}!*@This() {
-        _ = committed_size; // Ignored on POSIX - we commit everything
-
         // Ensure we allocate at least 2 pages (guard + usable space)
         const min_pages = 2;
         const adjusted_size = @max(maximum_size, page_size * min_pages);
@@ -23,10 +21,11 @@ pub const StackPosix = struct {
             return error.OutOfMemory;
         };
 
+        // Reserve address space with PROT_NONE (like Linux POC for lazy commit)
         const allocation = posix.mmap(
             null, // Address hint (null for system to choose)
             size,
-            posix.PROT.READ | posix.PROT.WRITE,
+            posix.PROT.NONE, // Reserved but not accessible
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
             -1, // File descriptor (not applicable)
             0, // Offset within the file (not applicable)
@@ -36,28 +35,32 @@ pub const StackPosix = struct {
         };
         errdefer posix.munmap(allocation);
 
-        // Protect the first page as a guard page (no read/write access)
-        // This will trigger a segfault if the stack overflows
-        posix.mprotect(
-            allocation.ptr[0..page_size],
-            posix.PROT.NONE,
-        ) catch |err| {
-            std.log.err("Failed to protect guard page: {}", .{err});
+        // Guard page stays as PROT_NONE (first page)
+
+        // Round committed size up to page boundary
+        const commit_size = std.mem.alignForward(usize, committed_size, page_size);
+
+        // Commit initial portion at top of stack
+        const stack_top = @intFromPtr(allocation.ptr) + size;
+        const initial_commit_start = stack_top - commit_size;
+        const initial_region: [*]align(page_size) u8 = @ptrFromInt(initial_commit_start);
+        posix.mprotect(initial_region[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch |err| {
+            std.log.err("Failed to commit initial stack region: {}", .{err});
             return error.OutOfMemory;
         };
 
         // Place the Stack metadata at the top of the allocation (high address)
-        const self_ptr = std.mem.alignBackward(usize, @intFromPtr(allocation.ptr) + allocation.len - @sizeOf(@This()), @alignOf(@This()));
+        const self_ptr = std.mem.alignBackward(usize, stack_top - @sizeOf(@This()), @alignOf(@This()));
         const self: *@This() = @ptrFromInt(self_ptr);
 
         // Stack layout (grows downward from high to low addresses):
-        // [guard_page][usable_stack_space][metadata]
-        // ^           ^                   ^
-        // allocation  limit               base
+        // [guard_page (PROT_NONE)][uncommitted (PROT_NONE)][committed (READ|WRITE)][metadata]
+        // ^                       ^                         ^                       ^
+        // allocation              limit                      initial_commit_start   base
         self.* = .{
             .allocation = allocation,
             .base = self_ptr, // Top of stack (high address, where metadata is)
-            .limit = @intFromPtr(allocation.ptr) + page_size, // Bottom of usable stack (just after guard)
+            .limit = initial_commit_start, // Bottom of committed region
             .valgrind_stack_id = 0,
         };
 
@@ -78,6 +81,50 @@ pub const StackPosix = struct {
             }
         }
         posix.munmap(self.allocation);
+    }
+
+    /// Extend the committed stack region by a growth factor (1.5x current size).
+    /// Commits in 64KB chunks. For testing stack growth mechanism.
+    pub fn extend(self: *@This()) error{StackOverflow}!void {
+        const chunk_size = 64 * 1024;
+        const growth_factor_num = 3;
+        const growth_factor_den = 2;
+
+        // Calculate current committed size
+        const current_committed = self.base - self.limit;
+
+        // Calculate new committed size (1.5x current)
+        const new_committed_size = (current_committed * growth_factor_num) / growth_factor_den;
+        const additional_size = new_committed_size - current_committed;
+        const size_to_commit = std.mem.alignForward(usize, additional_size, chunk_size);
+
+        // Calculate new limit (stack grows downward from high to low address)
+        const new_limit = if (self.limit >= size_to_commit) self.limit - size_to_commit else 0;
+
+        // Check we don't overflow into guard page
+        const guard_end = @intFromPtr(self.allocation.ptr) + page_size;
+        if (new_limit < guard_end) {
+            return error.StackOverflow;
+        }
+
+        // Commit the memory region (like Linux POC signal handler)
+        const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
+        const commit_size = self.limit - commit_start;
+        const addr: [*]align(page_size) u8 = @ptrFromInt(commit_start);
+        posix.mprotect(addr[0..commit_size], posix.PROT.READ | posix.PROT.WRITE) catch {
+            return error.StackOverflow;
+        };
+
+        // Update limit to new bottom of committed region
+        self.limit = commit_start;
+
+        // Notify valgrind of stack size change
+        if (builtin.mode == .Debug and builtin.valgrind_support) {
+            if (self.valgrind_stack_id != 0) {
+                const stack_slice: [*]u8 = @ptrFromInt(self.limit);
+                std.valgrind.stackChange(self.valgrind_stack_id, stack_slice[0 .. self.base - self.limit]);
+            }
+        }
     }
 };
 
@@ -185,6 +232,70 @@ pub const StackWindows = struct {
         }
         windows.VirtualFree(self.allocation.ptr, 0, windows.MEM_RELEASE);
     }
+
+    /// Extend the committed stack region by a growth factor (1.5x current size).
+    /// Commits in 64KB chunks. For testing stack growth mechanism.
+    pub fn extend(self: *@This()) error{StackOverflow}!void {
+        const chunk_size = 64 * 1024;
+        const growth_factor_num = 3;
+        const growth_factor_den = 2;
+
+        // Calculate current committed size
+        const current_committed = self.base - self.limit;
+
+        // Calculate new committed size (1.5x current)
+        const new_committed_size = (current_committed * growth_factor_num) / growth_factor_den;
+        const additional_size = new_committed_size - current_committed;
+        const size_to_commit = std.mem.alignForward(usize, additional_size, chunk_size);
+
+        // Calculate new limit (stack grows downward from high to low address)
+        const new_limit = if (self.limit >= size_to_commit) self.limit - size_to_commit else 0;
+
+        // Check we don't overflow into the allocation base
+        const alloc_base = @intFromPtr(self.allocation.ptr);
+        if (new_limit < alloc_base) {
+            return error.StackOverflow;
+        }
+
+        // Calculate new guard page position (one page before new committed region)
+        const new_guard_start = if (new_limit >= page_size) new_limit - page_size else alloc_base;
+        if (new_guard_start < alloc_base) {
+            return error.StackOverflow;
+        }
+
+        // Commit the new region
+        const commit_start = std.mem.alignBackward(usize, new_limit, page_size);
+        const commit_size = self.limit - commit_start;
+        _ = windows.VirtualAlloc(
+            @ptrFromInt(commit_start),
+            commit_size,
+            windows.MEM_COMMIT,
+            windows.PAGE_READWRITE,
+        ) catch {
+            return error.StackOverflow;
+        };
+
+        // Update the guard page (commit with PAGE_GUARD)
+        _ = windows.VirtualAlloc(
+            @ptrFromInt(new_guard_start),
+            page_size,
+            windows.MEM_COMMIT,
+            windows.PAGE_READWRITE | windows.PAGE_GUARD,
+        ) catch {
+            return error.StackOverflow;
+        };
+
+        // Update limit to new bottom of committed region
+        self.limit = commit_start;
+
+        // Notify valgrind of stack size change
+        if (builtin.mode == .Debug and builtin.valgrind_support) {
+            if (self.valgrind_stack_id != 0) {
+                const stack_slice: [*]u8 = @ptrFromInt(self.limit);
+                std.valgrind.stackChange(self.valgrind_stack_id, stack_slice[0 .. self.base - self.limit]);
+            }
+        }
+    }
 };
 
 pub const Stack = switch (builtin.os.tag) {
@@ -211,9 +322,9 @@ test "Stack: alloc/free" {
         // On Windows: [uncommitted][guard][committed][metadata]
         // limit points to start of committed region
         .windows => @intFromPtr(stack.allocation.ptr) + stack.allocation.len - commit_size_rounded,
-        // On POSIX: [guard][committed][metadata]
-        // limit points to start after guard page
-        else => @intFromPtr(stack.allocation.ptr) + page_size,
+        // On POSIX: [guard][uncommitted][committed][metadata]
+        // limit points to start of committed region
+        else => @intFromPtr(stack.allocation.ptr) + stack.allocation.len - commit_size_rounded,
     };
     try std.testing.expectEqual(expected_limit, stack.limit);
 
@@ -234,4 +345,29 @@ test "Stack: fully committed" {
     // Verify base is within the allocation
     try std.testing.expect(stack.base >= @intFromPtr(stack.allocation.ptr));
     try std.testing.expect(stack.base < @intFromPtr(stack.allocation.ptr) + stack.allocation.len);
+}
+
+test "Stack: extend" {
+    const maximum_size = 256 * 1024;
+    const initial_commit = 64 * 1024;
+    const stack = try Stack.alloc(maximum_size, initial_commit);
+    defer stack.free();
+
+    const initial_limit = stack.limit;
+    const initial_committed = stack.base - stack.limit;
+
+    // Extend by growth factor (1.5x)
+    try stack.extend();
+
+    // Verify limit moved down
+    try std.testing.expect(stack.limit < initial_limit);
+
+    // Verify committed size increased by ~50%
+    const new_committed = stack.base - stack.limit;
+    try std.testing.expect(new_committed > initial_committed);
+    try std.testing.expect(new_committed >= initial_committed * 14 / 10); // At least 1.4x due to rounding
+
+    // Verify we can write to the extended region
+    const extended_region: [*]u8 = @ptrFromInt(stack.limit);
+    @memset(extended_region[0..1024], 0xAA);
 }
