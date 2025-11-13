@@ -215,7 +215,11 @@ fn stackExtendPosix(info: *StackInfo) error{StackOverflow}!void {
     const size_to_commit = std.mem.alignForward(usize, additional_size, chunk_size);
 
     // Calculate new limit (stack grows downward from high to low address)
-    const new_limit = if (info.limit >= size_to_commit) info.limit - size_to_commit else 0;
+    // Check if we have enough uncommitted space
+    if (size_to_commit > info.limit) {
+        return error.StackOverflow;
+    }
+    const new_limit = info.limit - size_to_commit;
 
     // Check we don't overflow into guard page
     const guard_end = @intFromPtr(info.allocation_ptr) + page_size;
