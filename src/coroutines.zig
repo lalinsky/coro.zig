@@ -488,9 +488,11 @@ pub const Coroutine = struct {
 
         // Stack grows downward: base (high address) -> limit (low address)
         var stack_top = self.context.stack_info.base;
+        const stack_limit = self.context.stack_info.limit;
 
         // Copy our wrapper to stack (allocate downward from top)
         stack_top = std.mem.alignBackward(usize, stack_top - @sizeOf(CoroutineData), @alignOf(CoroutineData));
+        if (stack_top < stack_limit) @panic("Stack overflow during coroutine setup: not enough space for CoroutineData");
         const data: *CoroutineData = @ptrFromInt(stack_top);
         data.coro = self;
         data.func = func;
@@ -498,6 +500,7 @@ pub const Coroutine = struct {
 
         // Allocate and configure structure for coroEntry
         stack_top = std.mem.alignBackward(usize, stack_top - @sizeOf(Entrypoint), Context.stack_alignment);
+        if (stack_top < stack_limit) @panic("Stack overflow during coroutine setup: not enough space for Entrypoint");
         const entry: *Entrypoint = @ptrFromInt(stack_top);
         entry.func = &CoroutineData.entrypointFn;
         entry.context = data;
