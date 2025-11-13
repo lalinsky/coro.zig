@@ -561,10 +561,7 @@ test "Stack: extend" {
 }
 
 test "Stack: automatic growth" {
-    // Skip on Windows - automatic growth works differently
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    // Setup signal handler for this thread
+    // Setup signal handler (no-op on Windows where PAGE_GUARD handles it automatically)
     try setupStackGrowth();
     defer cleanupStackGrowth();
 
@@ -609,6 +606,8 @@ test "Stack: automatic growth" {
     coro.setup(&Closure.start, &closure);
 
     // Run coroutine - should trigger automatic stack growth
+    // On POSIX: via SIGSEGV/SIGBUS handler
+    // On Windows: via PAGE_GUARD mechanism
     while (!coro.finished) {
         coro.step();
     }
