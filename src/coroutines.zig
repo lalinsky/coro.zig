@@ -7,10 +7,7 @@ const print = std.debug.print;
 const Allocator = std.mem.Allocator;
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-
-pub const stack_alignment = 16;
-pub const Stack = []align(stack_alignment) u8;
-pub const StackPtr = [*]align(stack_alignment) u8;
+const Stack = @import("stack.zig").Stack;
 
 const WindowsTIB = extern struct {
     fiber_data: u64, // TEB offset 0x20
@@ -27,6 +24,8 @@ pub const Context = switch (builtin.cpu.arch) {
         rbp: u64,
         rip: u64,
         extra: ExtraContext,
+
+        pub const stack_alignment = 16;
     },
     .aarch64 => extern struct {
         sp: u64,  // x31 (stack pointer)
@@ -34,35 +33,40 @@ pub const Context = switch (builtin.cpu.arch) {
         lr: u64,  // x30 (link register)
         pc: u64,
         extra: ExtraContext,
+
+        pub const stack_alignment = 16;
     },
     .riscv64 => extern struct {
         sp: u64,
         fp: u64,
         pc: u64,
         extra: ExtraContext,
+
+        pub const stack_alignment = 16;
     },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
 pub const EntryPointFn = fn () callconv(.naked) noreturn;
 
-pub fn initContext(stack_ptr: StackPtr, entry_point: *const EntryPointFn) Context {
+pub fn initContext(stack_ptr: usize, entry_point: *const EntryPointFn) Context {
+    assert(stack_ptr % Context.stack_alignment == 0);
     return switch (builtin.cpu.arch) {
         .x86_64 => .{
-            .rsp = @intFromPtr(stack_ptr),
+            .rsp = stack_ptr,
             .rbp = 0,
             .rip = @intFromPtr(entry_point),
             .extra = undefined,
         },
         .aarch64 => .{
-            .sp = @intFromPtr(stack_ptr),
+            .sp = stack_ptr,
             .fp = 0,
             .lr = 0,
             .pc = @intFromPtr(entry_point),
             .extra = undefined,
         },
         .riscv64 => .{
-            .sp = @intFromPtr(stack_ptr),
+            .sp = stack_ptr,
             .fp = 0,
             .pc = @intFromPtr(entry_point),
             .extra = undefined,
@@ -449,7 +453,7 @@ fn coroEntry() callconv(.naked) noreturn {
 pub const Coroutine = struct {
     context: Context = undefined,
     parent_context_ptr: *Context,
-    stack: ?Stack,
+    stack: *Stack,
     finished: bool = false,
 
     /// Step into the coroutine
@@ -490,33 +494,32 @@ pub const Coroutine = struct {
             }
         };
 
-        // Convert the stack pointer to ints for calculations
-        const stack = self.stack.?; // Stack must be non-null during setup
-        const stack_base = @intFromPtr(stack.ptr);
-        var stack_end = stack_base + stack.len;
+        // Stack grows downward: base (high address) -> limit (low address)
+        const stack = self.stack;
+        var stack_top = stack.base;
 
-        // Copy our wrapper to stack
-        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(CoroutineData), @alignOf(CoroutineData));
-        const data: *CoroutineData = @ptrFromInt(stack_end);
+        // Copy our wrapper to stack (allocate downward from top)
+        stack_top = std.mem.alignBackward(usize, stack_top - @sizeOf(CoroutineData), @alignOf(CoroutineData));
+        const data: *CoroutineData = @ptrFromInt(stack_top);
         data.coro = self;
         data.func = func;
         data.userdata = userdata;
 
         // Allocate and configure structure for coroEntry
-        stack_end = std.mem.alignBackward(usize, stack_end - @sizeOf(Entrypoint), stack_alignment);
-        const entry: *Entrypoint = @ptrFromInt(stack_end);
+        stack_top = std.mem.alignBackward(usize, stack_top - @sizeOf(Entrypoint), Context.stack_alignment);
+        const entry: *Entrypoint = @ptrFromInt(stack_top);
         entry.func = &CoroutineData.entrypointFn;
         entry.context = data;
 
         // Initialize the context with the entry point
-        self.context = initContext(@ptrCast(@alignCast(entry)), &coroEntry);
+        self.context = initContext(stack_top, &coroEntry);
 
         // Initialize Windows TIB fields for the coroutine stack
         if (builtin.os.tag == .windows) {
             self.context.extra.fiber_data = 0; // No fiber data for our coroutines
-            self.context.extra.stack_base = stack_end; // Top of stack (high address)
-            self.context.extra.stack_limit = stack_base; // Bottom of stack (low address)
-            self.context.extra.deallocation_stack = stack_base; // Allocation base
+            self.context.extra.stack_base = stack.base; // Top of stack (high address)
+            self.context.extra.stack_limit = stack.limit; // Bottom of committed stack (low address)
+            self.context.extra.deallocation_stack = @intFromPtr(stack.allocation.ptr); // Allocation base
         }
     }
 };
@@ -552,8 +555,8 @@ pub fn Closure(func: anytype) type {
 }
 
 test "Coroutine: basic" {
-    const stack = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
-    defer std.testing.allocator.free(stack);
+    const stack = try Stack.alloc(64 * 1024, 4096);
+    defer stack.free();
 
     var parent_context: Context = undefined;
     var coro: Coroutine = .{
@@ -579,10 +582,10 @@ test "Coroutine: basic" {
 }
 
 test "Coroutine: message passing" {
-    const stack1 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
-    defer std.testing.allocator.free(stack1);
-    const stack2 = try std.testing.allocator.alignedAlloc(u8, .fromByteUnits(stack_alignment), 4096);
-    defer std.testing.allocator.free(stack2);
+    const stack1 = try Stack.alloc(64 * 1024, 4096);
+    defer stack1.free();
+    const stack2 = try Stack.alloc(64 * 1024, 4096);
+    defer stack2.free();
 
     var parent_context: Context = undefined;
 
