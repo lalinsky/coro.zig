@@ -73,14 +73,6 @@ jobs:
       run: ./zig-out/bin/test
       timeout-minutes: 5
 
-    - name: Test stack growth PoC (macOS only)
-      if: matrix.run == 'native' && runner.os == 'macOS'
-      run: |
-        echo "Building and testing macOS stack growth PoC..."
-        zig build-exe poc/macos_stack_growth_poc.zig
-        ./macos_stack_growth_poc
-      timeout-minutes: 2
-
     - name: Show crash logs (macOS)
       if: failure() && runner.os == 'macOS'
       run: |

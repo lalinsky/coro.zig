@@ -355,7 +355,7 @@ pub fn setupStackGrowth() !void {
     if (prev_refcount == 0) {
         std.log.info("setupStackGrowth: Installing signal handlers", .{});
         var sa = posix.Sigaction{
-            .handler = .{ .sigaction = sigsegvHandler },
+            .handler = .{ .sigaction = stackFaultHandler },
             .mask = posix.sigemptyset(),
             .flags = posix.SA.SIGINFO | posix.SA.ONSTACK | posix.SA.NODEFER,
         };
@@ -365,12 +365,12 @@ pub fn setupStackGrowth() !void {
         // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
         if (builtin.os.tag.isDarwin()) {
             posix.sigaction(posix.SIG.BUS, &sa, null);
-            std.log.info("setupStackGrowth: SIGSEGV and SIGBUS handlers installed", .{});
+            std.log.info("setupStackGrowth: Handlers installed (SIGSEGV + SIGBUS)", .{});
         } else {
-            std.log.info("setupStackGrowth: SIGSEGV handler installed successfully", .{});
+            std.log.info("setupStackGrowth: Handler installed (SIGSEGV)", .{});
         }
     } else {
-        std.log.info("setupStackGrowth: Signal handlers already installed (refcount now: {d})", .{prev_refcount + 1});
+        std.log.info("setupStackGrowth: Handlers already installed (refcount: {d})", .{prev_refcount + 1});
     }
 
     std.log.info("setupStackGrowth: Complete", .{});
@@ -435,38 +435,38 @@ inline fn getFaultAddress(info: *const posix.siginfo_t) usize {
     });
 }
 
-/// SIGSEGV signal handler for automatic stack growth.
+/// Signal handler for automatic stack growth (SIGSEGV on Linux/BSD, SIGBUS on macOS).
 /// This handler checks if the fault is within a coroutine's uncommitted stack region
-/// and extends the stack if so. Real segmentation faults are re-raised.
-fn sigsegvHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque) callconv(.c) void {
+/// and extends the stack if so. Real faults are re-raised.
+fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque) callconv(.c) void {
     _ = sig;
 
-    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Handler entered\n") catch {};
+    _ = posix.write(posix.STDERR_FILENO, "Stack fault: Handler entered\n") catch {};
 
     const fault_addr = getFaultAddress(info);
 
     var buf: [100]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "SIGSEGV: Fault at 0x{x}\n", .{fault_addr}) catch "SIGSEGV: Fault address unknown\n";
+    const msg = std.fmt.bufPrint(&buf, "Stack fault: Fault at 0x{x}\n", .{fault_addr}) catch "Stack fault: Fault address unknown\n";
     _ = posix.write(posix.STDERR_FILENO, msg) catch {};
 
     // Get current_context from coroutines module
     const current_ctx = coroutines.current_context orelse {
-        // Not in a coroutine context - this is a real segfault
-        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: No current context\n") catch {};
+        // Not in a coroutine context - this is a real fault
+        _ = posix.write(posix.STDERR_FILENO, "Stack fault: No current context\n") catch {};
         abortOnSegfault(fault_addr);
     };
 
-    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Have context\n") catch {};
+    _ = posix.write(posix.STDERR_FILENO, "Stack fault: Have context\n") catch {};
 
     const stack_info = &current_ctx.stack_info;
 
     // Check if allocation_ptr is null (not our stack)
     if (@intFromPtr(stack_info.allocation_ptr) == 0) {
-        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Null allocation_ptr\n") catch {};
+        _ = posix.write(posix.STDERR_FILENO, "Stack fault: Null allocation_ptr\n") catch {};
         abortOnSegfault(fault_addr);
     }
 
-    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Checking stack region\n") catch {};
+    _ = posix.write(posix.STDERR_FILENO, "Stack fault: Checking stack region\n") catch {};
 
     // Check if fault is in uncommitted stack region
     // Stack layout: [guard_page][uncommitted][committed]
@@ -476,19 +476,19 @@ fn sigsegvHandler(sig: c_int, info: *const posix.siginfo_t, _: ?*const anyopaque
 
     if (fault_addr >= uncommitted_start and fault_addr < uncommitted_end) {
         // Fault is in uncommitted region - extend the stack
-        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Extending stack\n") catch {};
+        _ = posix.write(posix.STDERR_FILENO, "Stack fault: Extending stack\n") catch {};
         stackExtendPosix(stack_info) catch {
             // Extension failed - abort
-            _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Extension failed\n") catch {};
+            _ = posix.write(posix.STDERR_FILENO, "Stack fault: Extension failed\n") catch {};
             abortOnStackOverflow(fault_addr);
         };
         // Stack extended successfully - return to resume execution
-        _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Stack extended, returning\n") catch {};
+        _ = posix.write(posix.STDERR_FILENO, "Stack fault: Stack extended, returning\n") catch {};
         return;
     }
 
-    // Fault is not in our stack region - this is a real segfault
-    _ = posix.write(posix.STDERR_FILENO, "SIGSEGV: Not in stack region\n") catch {};
+    // Fault is not in our stack region - this is a real fault
+    _ = posix.write(posix.STDERR_FILENO, "Stack fault: Not in stack region\n") catch {};
     abortOnSegfault(fault_addr);
 }
 
@@ -578,7 +578,7 @@ test "Stack: extend" {
     @memset(extended_region[0..1024], 0xAA);
 }
 
-test "Stack: automatic growth via SIGSEGV" {
+test "Stack: automatic growth" {
     // Skip on Windows - automatic growth works differently
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
