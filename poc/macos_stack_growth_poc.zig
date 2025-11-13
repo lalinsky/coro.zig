@@ -123,13 +123,15 @@ pub fn main() !void {
     };
     try posix.sigaltstack(&ss, null);
 
-    // Install SIGSEGV handler
+    // Install signal handler for both SIGSEGV and SIGBUS
+    // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
     var sa = posix.Sigaction{
         .handler = .{ .sigaction = sigsegvHandler },
         .mask = posix.sigemptyset(),
         .flags = posix.SA.SIGINFO | posix.SA.ONSTACK,
     };
     posix.sigaction(posix.SIG.SEGV, &sa, null);
+    posix.sigaction(posix.SIG.BUS, &sa, null); // macOS uses SIGBUS for PROT_NONE
 
     std.debug.print("SIGSEGV handler installed\n", .{});
     std.debug.print("Attempting to use {d} KB of stack...\n\n", .{STACK_SIZE / 1024});

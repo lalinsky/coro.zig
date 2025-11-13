@@ -353,7 +353,7 @@ pub fn setupStackGrowth() !void {
     errdefer _ = signal_handler_refcount.fetchSub(1, .release);
 
     if (prev_refcount == 0) {
-        std.log.info("setupStackGrowth: Installing SIGSEGV handler", .{});
+        std.log.info("setupStackGrowth: Installing signal handlers", .{});
         var sa = posix.Sigaction{
             .handler = .{ .sigaction = sigsegvHandler },
             .mask = posix.sigemptyset(),
@@ -361,9 +361,16 @@ pub fn setupStackGrowth() !void {
         };
 
         posix.sigaction(posix.SIG.SEGV, &sa, &old_sigaction);
-        std.log.info("setupStackGrowth: SIGSEGV handler installed successfully", .{});
+
+        // macOS sends SIGBUS for PROT_NONE access, not SIGSEGV
+        if (builtin.os.tag.isDarwin()) {
+            posix.sigaction(posix.SIG.BUS, &sa, null);
+            std.log.info("setupStackGrowth: SIGSEGV and SIGBUS handlers installed", .{});
+        } else {
+            std.log.info("setupStackGrowth: SIGSEGV handler installed successfully", .{});
+        }
     } else {
-        std.log.info("setupStackGrowth: SIGSEGV handler already installed (refcount now: {d})", .{prev_refcount + 1});
+        std.log.info("setupStackGrowth: Signal handlers already installed (refcount now: {d})", .{prev_refcount + 1});
     }
 
     std.log.info("setupStackGrowth: Complete", .{});
@@ -401,8 +408,17 @@ pub fn cleanupStackGrowth() void {
         // Decrement refcount; if this was the last thread, uninstall the handler
         const prev_refcount = signal_handler_refcount.fetchSub(1, .release);
         if (prev_refcount == 1) {
-            // We were the last thread - restore the old signal handler
+            // We were the last thread - restore the old signal handlers
             posix.sigaction(posix.SIG.SEGV, &old_sigaction, null);
+            if (builtin.os.tag.isDarwin()) {
+                // Note: we don't save the old SIGBUS handler, just restore default
+                var default_sa = posix.Sigaction{
+                    .handler = .{ .handler = posix.SIG.DFL },
+                    .mask = posix.sigemptyset(),
+                    .flags = 0,
+                };
+                posix.sigaction(posix.SIG.BUS, &default_sa, null);
+            }
         }
     }
 }
