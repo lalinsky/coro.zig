@@ -534,6 +534,9 @@ test "Stack: automatic growth via SIGSEGV" {
     // Skip on Windows - automatic growth works differently
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
+    // Skip on macOS - crashes
+    if (builtin.os.tag == .macos) return error.SkipZigTest;
+
     // Setup signal handler for this thread
     try setupStackGrowth();
     defer cleanupStackGrowth();
