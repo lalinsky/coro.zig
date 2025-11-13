@@ -109,7 +109,8 @@ pub fn stackAlloc(info: *StackInfo, maximum_size: usize, committed_size: usize) 
 fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize) error{OutOfMemory}!void {
     // Ensure we allocate at least 2 pages (guard + usable space)
     const min_pages = 2;
-    const adjusted_size = @max(maximum_size, page_size * min_pages);
+    // Add guard page to maximum_size to get total allocation size
+    const adjusted_size = @max(maximum_size + page_size, page_size * min_pages);
 
     const size = std.math.ceilPowerOfTwo(usize, adjusted_size) catch |err| {
         std.log.err("Failed to calculate stack size: {}", .{err});
@@ -137,6 +138,12 @@ fn stackAllocPosix(info: *StackInfo, maximum_size: usize, committed_size: usize)
 
     // Round committed size up to page boundary
     const commit_size = std.mem.alignForward(usize, committed_size, page_size);
+
+    // Validate that committed size doesn't exceed available space (minus guard page)
+    if (commit_size > size - page_size) {
+        std.log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, size - page_size });
+        return error.OutOfMemory;
+    }
 
     // Commit initial portion at top of stack
     const stack_top = @intFromPtr(allocation.ptr) + size;
@@ -233,6 +240,12 @@ fn stackAllocWindows(info: *StackInfo, maximum_size: usize, committed_size: usiz
     // Round sizes up to page boundary
     const commit_size = std.mem.alignForward(usize, committed_size, page_size);
     const max_size = std.mem.alignForward(usize, maximum_size, page_size);
+
+    // Validate that committed size doesn't exceed maximum size
+    if (commit_size > max_size) {
+        std.log.err("Committed size ({d}) exceeds maximum size ({d}) after alignment", .{ commit_size, max_size });
+        return error.OutOfMemory;
+    }
 
     // Use RtlCreateUserStack for automatic stack growth via PAGE_GUARD
     const ALLOCATION_GRANULARITY = 65536; // 64KB on Windows
