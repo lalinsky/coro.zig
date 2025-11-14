@@ -64,27 +64,10 @@ pub const StackPool = struct {
     }
 
     /// Acquires a stack from the pool, or allocates a new one if the pool is empty.
-    /// Removes expired stacks based on max_age_ns.
     /// All stacks from this pool have the configured maximum_size and committed_size.
     pub fn acquire(self: *StackPool) error{OutOfMemory}!StackInfo {
         self.mutex.lock();
         defer self.mutex.unlock();
-
-        const now = std.time.Instant.now() catch unreachable;
-
-        // Remove expired stacks from the front of the list
-        if (self.config.max_age_ns > 0) {
-            while (self.head) |node| {
-                const age_ns = now.since(node.timestamp);
-                if (age_ns > self.config.max_age_ns) {
-                    self.removeNode(node);
-                    stack.stackFree(node.stack_info);
-                } else {
-                    // List is ordered by timestamp, so we can stop
-                    break;
-                }
-            }
-        }
 
         // Try to reuse a stack from the pool
         if (self.head) |node| {
@@ -100,6 +83,7 @@ pub const StackPool = struct {
     }
 
     /// Releases a stack back to the pool.
+    /// Expired stacks are removed before adding the new stack to avoid depleting the pool.
     /// If the pool is full, frees the oldest stack and adds this one.
     /// If the stack's committed region is too small to store the FreeNode, the stack is freed instead.
     pub fn release(self: *StackPool, stack_info: StackInfo) void {
@@ -115,6 +99,23 @@ pub const StackPool = struct {
             // Stack is too small to hold the FreeNode, free it instead of pooling
             stack.stackFree(stack_info);
             return;
+        }
+
+        // Remove expired stacks from the front of the list
+        // Do this before adding the new stack to avoid the situation where we'd
+        // remove all stacks (including the one we're about to add) and end up with an empty pool
+        if (self.config.max_age_ns > 0) {
+            const now = std.time.Instant.now() catch unreachable;
+            while (self.head) |node| {
+                const age_ns = now.since(node.timestamp);
+                if (age_ns > self.config.max_age_ns) {
+                    self.removeNode(node);
+                    stack.stackFree(node.stack_info);
+                } else {
+                    // List is ordered by timestamp, so we can stop
+                    break;
+                }
+            }
         }
 
         // If pool is at capacity, free the oldest stack
