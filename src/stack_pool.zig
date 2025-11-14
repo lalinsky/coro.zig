@@ -90,10 +90,6 @@ pub const StackPool = struct {
         if (self.head) |node| {
             const stack_info = node.stack_info;
             self.removeNode(node);
-
-            // Recycle the stack memory (MADV_FREE on POSIX)
-            stack.stackRecycle(stack_info);
-
             return stack_info;
         }
 
@@ -116,6 +112,9 @@ pub const StackPool = struct {
                 stack.stackFree(oldest.stack_info);
             }
         }
+
+        // Recycle the stack memory (MADV_FREE on POSIX)
+        stack.stackRecycle(stack_info);
 
         // Store the FreeNode at the base of the stack (aligned backward from base)
         const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
