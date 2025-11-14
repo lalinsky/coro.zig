@@ -101,9 +101,21 @@ pub const StackPool = struct {
 
     /// Releases a stack back to the pool.
     /// If the pool is full, frees the oldest stack and adds this one.
+    /// If the stack's committed region is too small to store the FreeNode, the stack is freed instead.
     pub fn release(self: *StackPool, stack_info: StackInfo) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        // Check if the stack has enough committed space to store the FreeNode
+        // The FreeNode is stored at the base of the stack (aligned backward)
+        const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
+
+        // Verify the FreeNode fits within the committed region (between limit and base)
+        if (node_addr < stack_info.limit) {
+            // Stack is too small to hold the FreeNode, free it instead of pooling
+            stack.stackFree(stack_info);
+            return;
+        }
 
         // If pool is at capacity, free the oldest stack
         if (self.pool_size >= self.config.max_unused_stacks) {
@@ -116,8 +128,7 @@ pub const StackPool = struct {
         // Recycle the stack memory (MADV_FREE on POSIX)
         stack.stackRecycle(stack_info);
 
-        // Store the FreeNode at the base of the stack (aligned backward from base)
-        const node_addr = std.mem.alignBackward(usize, stack_info.base - @sizeOf(FreeNode), @alignOf(FreeNode));
+        // Store the FreeNode at the base of the stack
         const node = @as(*FreeNode, @ptrFromInt(node_addr));
         node.* = .{
             .prev = null,
@@ -262,4 +273,29 @@ test "StackPool age-based expiration" {
 
     // Clean up
     stack.stackFree(stack2);
+}
+
+test "StackPool rejects stacks too small for FreeNode" {
+    const testing = std.testing;
+
+    var pool = StackPool.init(.{
+        .maximum_size = 1024 * 1024,
+        .committed_size = 64 * 1024,
+        .max_unused_stacks = 4,
+    });
+    defer pool.deinit();
+
+    // Try to allocate a stack with 0 committed size
+    var tiny_stack: StackInfo = undefined;
+    try stack.stackAlloc(&tiny_stack, 1024 * 1024, 0);
+
+    // Verify the committed size is indeed too small for FreeNode
+    const committed_size = tiny_stack.base - tiny_stack.limit;
+    try testing.expect(committed_size < @sizeOf(FreeNode));
+
+    // Release it - should be freed instead of pooled
+    pool.release(tiny_stack);
+    try testing.expectEqual(0, pool.pool_size); // Should not be in pool
+
+    // Note: tiny_stack was freed by release(), no need to free it again
 }
