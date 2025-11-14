@@ -466,7 +466,7 @@ fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque)
 
     // Check if fault is in guard page (true stack overflow)
     if (fault_addr >= stack_base and fault_addr < guard_page_end) {
-        abortOnStackOverflow(fault_addr);
+        abortOnStackOverflow(fault_addr, stack_info);
     }
 
     // Check if fault is in uncommitted region (automatic growth)
@@ -474,7 +474,7 @@ fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque)
         // Fault is in uncommitted region - extend the stack
         stackExtendPosix(stack_info) catch {
             // Extension failed - this is a stack overflow
-            abortOnStackOverflow(fault_addr);
+            abortOnStackOverflow(fault_addr, stack_info);
         };
         // Stack extended successfully - return to resume execution
         return;
@@ -486,9 +486,31 @@ fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque)
 
 /// Abort with diagnostic message on stack overflow.
 /// Uses async-signal-safe write() to stderr in a single call.
-fn abortOnStackOverflow(fault_addr: usize) noreturn {
-    var buf: [100]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "SIGSEGV: Stack overflow at address 0x{x}\n", .{fault_addr}) catch "SIGSEGV: Stack overflow\n";
+fn abortOnStackOverflow(fault_addr: usize, stack_info: *const StackInfo) noreturn {
+    var buf: [300]u8 = undefined;
+
+    const stack_base = @intFromPtr(stack_info.allocation_ptr);
+    const stack_size = stack_info.allocation_len;
+    const committed = stack_info.base - stack_info.limit;
+    const is_guard_page_fault = fault_addr >= stack_base and fault_addr < stack_base + page_size;
+
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Coroutine stack overflow!\n" ++
+            "  Fault address:    0x{x}\n" ++
+            "  Stack base:       0x{x}\n" ++
+            "  Stack size:       {d} KB\n" ++
+            "  Committed:        {d} KB\n" ++
+            "  Guard page fault: {}\n",
+        .{
+            fault_addr,
+            stack_base,
+            stack_size / 1024,
+            committed / 1024,
+            is_guard_page_fault,
+        },
+    ) catch "Coroutine stack overflow (error formatting message)\n";
+
     _ = posix.write(posix.STDERR_FILENO, msg) catch {};
     posix.abort();
 }
