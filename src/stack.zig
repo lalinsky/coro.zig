@@ -458,12 +458,18 @@ fn stackFaultHandler(sig: c_int, info: *const posix.siginfo_t, ctx: ?*anyopaque)
         invokePreviousHandler(sig, info, ctx);
     }
 
-    // Check if fault is in uncommitted stack region
     // Stack layout: [guard_page][uncommitted][committed]
-    const guard_end = @intFromPtr(stack_info.allocation_ptr) + page_size;
-    const uncommitted_start = guard_end;
+    const stack_base = @intFromPtr(stack_info.allocation_ptr);
+    const guard_page_end = stack_base + page_size;
+    const uncommitted_start = guard_page_end;
     const uncommitted_end = stack_info.limit;
 
+    // Check if fault is in guard page (true stack overflow)
+    if (fault_addr >= stack_base and fault_addr < guard_page_end) {
+        abortOnStackOverflow(fault_addr);
+    }
+
+    // Check if fault is in uncommitted region (automatic growth)
     if (fault_addr >= uncommitted_start and fault_addr < uncommitted_end) {
         // Fault is in uncommitted region - extend the stack
         stackExtendPosix(stack_info) catch {
