@@ -2,17 +2,19 @@ const std = @import("std");
 const coro = @import("coro");
 
 fn causeSegfault() void {
-    var null_addr: usize = 100;
-    null_addr -= 100;
-    const ptr: *u32 = @ptrFromInt(null_addr);
+    // Use a low invalid address (not 0 to bypass Zig's null pointer check)
+    // Use volatile to prevent compiler optimization
+    var invalid_addr: usize = 10;
+    _ = @as(*volatile usize, @ptrCast(&invalid_addr));
+    const ptr: *u32 = @ptrFromInt(invalid_addr);
 
-    std.debug.print("About to access null pointer at 0x{x}...\n", .{null_addr});
+    std.debug.print("About to access invalid address at 0x{x}...\n", .{invalid_addr});
 
     // This will cause a segmentation fault
     _ = ptr.*;
 
     // Should never reach here
-    std.debug.print("ERROR: Survived null pointer dereference!\n", .{});
+    std.debug.print("ERROR: Survived invalid pointer dereference!\n", .{});
 }
 
 fn runCoroutine(c: *coro.Coroutine) void {
