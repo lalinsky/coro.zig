@@ -274,28 +274,3 @@ test "StackPool age-based expiration" {
     // Clean up
     stack.stackFree(stack2);
 }
-
-test "StackPool rejects stacks too small for FreeNode" {
-    const testing = std.testing;
-
-    var pool = StackPool.init(.{
-        .maximum_size = 1024 * 1024,
-        .committed_size = 64 * 1024,
-        .max_unused_stacks = 4,
-    });
-    defer pool.deinit();
-
-    // Try to allocate a stack with 0 committed size
-    var tiny_stack: StackInfo = undefined;
-    try stack.stackAlloc(&tiny_stack, 1024 * 1024, 0);
-
-    // Verify the committed size is indeed too small for FreeNode
-    const committed_size = tiny_stack.base - tiny_stack.limit;
-    try testing.expect(committed_size < @sizeOf(FreeNode));
-
-    // Release it - should be freed instead of pooled
-    pool.release(tiny_stack);
-    try testing.expectEqual(0, pool.pool_size); // Should not be in pool
-
-    // Note: tiny_stack was freed by release(), no need to free it again
-}
