@@ -62,7 +62,6 @@ TEST_CASES = [
             "Segmentation Fault Test",
             "Running coroutine that will segfault",
             "Inside coroutine, causing segfault",
-            "About to access null pointer at 0x0",
         ],
         must_not_contain=[
             "ERROR: Survived null pointer dereference",

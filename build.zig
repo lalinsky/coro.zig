@@ -62,7 +62,7 @@ pub fn build(b: *std.Build) void {
 
     const install_segfault = b.addInstallArtifact(segfault_exe, .{});
 
-    const install_tests_step = b.step("install-tests", "Install standalone test programs");
-    install_tests_step.dependOn(&install_stack_overflow.step);
-    install_tests_step.dependOn(&install_segfault.step);
+    const install_signal_tests_step = b.step("install-signal-tests", "Install standalone signal test programs");
+    install_signal_tests_step.dependOn(&install_stack_overflow.step);
+    install_signal_tests_step.dependOn(&install_segfault.step);
 }
