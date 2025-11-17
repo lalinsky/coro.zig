@@ -407,44 +407,52 @@ pub inline fn switchContext(
 ///
 /// The function is called with the context pointer as the first argument.
 ///
-/// x86_64 handles stack alignment here since we use JMP instead of CALL:
-/// - x86_64 System V ABI requires 16-byte alignment before CALL instruction
-/// - CALL would push 8-byte return address, so we push 0 to simulate this
-/// - If the function unexpectedly returns, it will crash on null address (defensive)
-///
-/// ARM64 stores return address in x30 register (not stack). x30 is already 0 from
-/// Context.lr initialization, so no need to explicitly set it here.
+/// IMPORTANT: This function creates a fake stack frame at the bottom of the coroutine
+/// to ensure DWARF/FP unwinding can stop gracefully. The fake frame contains zeros for
+/// the saved frame pointer and return address, which act as sentinels for the unwinder.
+/// Frame layouts vary by architecture - see std.debug.StackIterator for details.
 fn coroEntry() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => {
             if (builtin.os.tag == .windows) {
                 // Windows x64 ABI: first integer arg in RCX
-                // Allocate shadow space before return address to match call convention
+                // Frame layout: [rbp+16..47]=shadow, [rbp+8]=return_addr, [rbp+0]=saved_rbp
                 asm volatile (
-                    \\ subq $32, %%rsp
-                    \\ pushq $0
-                    \\ movq 48(%%rsp), %%rcx
-                    \\ jmpq *40(%%rsp)
+                    \\ subq $32, %%rsp    // Allocate shadow space (above frame)
+                    \\ pushq $0           // Fake return address = 0
+                    \\ pushq $0           // Fake saved RBP = 0
+                    \\ movq %%rsp, %%rbp  // RBP points to fake saved_rbp
+                    \\ movq 56(%%rsp), %%rcx  // Load context (32 shadow + 8 ret + 8 rbp + 8)
+                    \\ jmpq *48(%%rsp)        // Jump to func (32 shadow + 8 ret + 8 rbp)
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
+                // Frame layout: [rbp+8]=return_addr, [rbp+0]=saved_rbp
                 asm volatile (
-                    \\ pushq $0
-                    \\ movq 16(%%rsp), %%rdi
-                    \\ jmpq *8(%%rsp)
+                    \\ pushq $0           // Fake return address = 0
+                    \\ pushq $0           // Fake saved RBP = 0
+                    \\ movq %%rsp, %%rbp  // RBP points to fake saved_rbp
+                    \\ movq 24(%%rsp), %%rdi  // Load context (8 ret + 8 rbp + 8)
+                    \\ jmpq *16(%%rsp)        // Jump to func (8 ret + 8 rbp)
                 );
             }
         },
         .aarch64 => asm volatile (
-            // x30 is already 0 from Context.lr initialization and switchContext restore
-            \\ ldr x0, [sp, #8]
-            \\ ldr x2, [sp]
+            // Frame layout: [fp+0]=saved_fp, [fp+8]=saved_lr
+            \\ stp xzr, xzr, [sp, #-16]!  // Push [saved_fp=0, saved_lr=0]
+            \\ mov fp, sp                  // FP points to saved_fp
+            \\ ldr x0, [sp, #24]           // Load context (16 fake + 8)
+            \\ ldr x2, [sp, #16]           // Load func (16 fake)
             \\ br x2
         ),
         .riscv64 => asm volatile (
-            \\ li ra, 0
-            \\ ld a0, 8(sp)
-            \\ ld t0, 0(sp)
+            // Frame layout: [fp-16]=saved_fp, [fp-8]=saved_ra (FP points above saves)
+            \\ addi sp, sp, -16   // Allocate fake frame
+            \\ sd zero, 0(sp)     // [sp+0] = saved FP = 0
+            \\ sd zero, 8(sp)     // [sp+8] = saved RA = 0
+            \\ addi s0, sp, 16    // FP points 16 bytes above (at top of saves)
+            \\ ld a0, 24(sp)      // Load context (16 fake + 8)
+            \\ ld t0, 16(sp)      // Load func (16 fake)
             \\ jr t0
         ),
         else => @compileError("unsupported architecture"),
@@ -512,6 +520,17 @@ pub const Coroutine = struct {
         const entry: *Entrypoint = @ptrFromInt(stack_top);
         entry.func = &CoroutineData.entrypointFn;
         entry.context = data;
+
+        // Zero out a safety region below the entry point to ensure DWARF unwinding
+        // sees proper sentinel values instead of garbage when it reads saved registers.
+        // This fixes crashes in Zig 0.16+ where the new DWARF unwinder is more aggressive.
+        // See: https://github.com/ziglang/zig/pull/25227
+        const safety_region_size = 256; // Enough for saved registers and frame metadata
+        const safety_region_start = stack_top -| safety_region_size;
+        if (safety_region_start >= stack_limit) {
+            const region: [*]u8 = @ptrFromInt(safety_region_start);
+            @memset(region[0..safety_region_size], 0);
+        }
 
         // Initialize the context with the entry point
         setupContext(&self.context, stack_top, &coroEntry);
