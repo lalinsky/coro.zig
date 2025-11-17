@@ -13,6 +13,12 @@ pub const cleanupStackGrowth = @import("stack.zig").cleanupStackGrowth;
 pub const StackPool = @import("stack_pool.zig").StackPool;
 pub const StackPoolConfig = @import("stack_pool.zig").Config;
 
+// Disable std.debug's segfault handler to avoid conflicts with our stack growth handler
+// and to get cleaner crash info from debuggers in CI
+pub const std_options = .{
+    .enable_segfault_handler = false,
+};
+
 test {
     _ = @import("coroutines.zig");
     _ = @import("stack.zig");

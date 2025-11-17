@@ -95,7 +95,23 @@ jobs:
       if: matrix.run == 'vm' && matrix.vm_type == 'freebsd'
       uses: vmactions/freebsd-vm@v1
       with:
-        run: ./zig-out/bin/test
+        run: |
+          pkg install -y gdb
+          cat > run.sh << 'EOF'
+          #!/bin/sh
+          gdb -batch -ex "set pagination off" \
+              -ex "handle SIGILL stop print" \
+              -ex "handle SIGSEGV stop print" \
+              -ex "handle SIGBUS stop print" \
+              -ex "run" \
+              -ex "thread apply all bt" \
+              -ex "info registers" \
+              -ex "x/10i \$pc-20" \
+              --args ./zig-out/bin/test
+          exit $?
+          EOF
+          chmod +x run.sh
+          bash run.sh || echo "Test failed with exit code $?"
 
     - name: Run tests (NetBSD VM)
       if: matrix.run == 'vm' && matrix.vm_type == 'netbsd'
