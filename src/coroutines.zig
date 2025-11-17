@@ -416,24 +416,30 @@ fn coroEntry() callconv(.naked) noreturn {
         .x86_64 => {
             if (builtin.os.tag == .windows) {
                 // Windows x64 ABI: first integer arg in RCX
-                // Frame layout: [rbp+16..47]=shadow, [rbp+8]=return_addr, [rbp+0]=saved_rbp
+                // Frame layout: [rbp+8]=return_addr, [rbp+0]=saved_rbp
+                // Stack must be 16-byte aligned at function entry (rsp+8 is multiple of 16)
                 asm volatile (
-                    \\ subq $32, %%rsp    // Allocate shadow space (above frame)
-                    \\ pushq $0           // Fake return address = 0
-                    \\ pushq $0           // Fake saved RBP = 0
+                    \\ subq $32, %%rsp    // Allocate shadow space (32 bytes)
+                    \\ pushq $0           // Alignment padding (8 bytes)
+                    \\ pushq $0           // Fake return address = 0 (8 bytes)
+                    \\ pushq $0           // Fake saved RBP = 0 (8 bytes)
                     \\ movq %%rsp, %%rbp  // RBP points to fake saved_rbp
-                    \\ movq 56(%%rsp), %%rcx  // Load context (32 shadow + 8 ret + 8 rbp + 8)
-                    \\ jmpq *48(%%rsp)        // Jump to func (32 shadow + 8 ret + 8 rbp)
+                    // Total: 32 + 24 = 56 bytes, rsp is now 8 off from 16-byte alignment ✓
+                    \\ movq 64(%%rsp), %%rcx  // Load context (32 shadow + 8 align + 8 ret + 8 rbp + 8)
+                    \\ jmpq *56(%%rsp)        // Jump to func (32 shadow + 8 align + 8 ret + 8 rbp)
                 );
             } else {
                 // System V AMD64 ABI: first integer arg in RDI
                 // Frame layout: [rbp+8]=return_addr, [rbp+0]=saved_rbp
+                // Stack must be 16-byte aligned at function entry (rsp+8 is multiple of 16)
                 asm volatile (
-                    \\ pushq $0           // Fake return address = 0
-                    \\ pushq $0           // Fake saved RBP = 0
+                    \\ pushq $0           // Alignment padding (8 bytes)
+                    \\ pushq $0           // Fake return address = 0 (8 bytes)
+                    \\ pushq $0           // Fake saved RBP = 0 (8 bytes)
                     \\ movq %%rsp, %%rbp  // RBP points to fake saved_rbp
-                    \\ movq 24(%%rsp), %%rdi  // Load context (8 ret + 8 rbp + 8)
-                    \\ jmpq *16(%%rsp)        // Jump to func (8 ret + 8 rbp)
+                    // Total: 24 bytes, rsp is now 8 off from 16-byte alignment ✓
+                    \\ movq 32(%%rsp), %%rdi  // Load context (8 align + 8 ret + 8 rbp + 8)
+                    \\ jmpq *24(%%rsp)        // Jump to func (8 align + 8 ret + 8 rbp)
                 );
             }
         },
@@ -520,17 +526,6 @@ pub const Coroutine = struct {
         const entry: *Entrypoint = @ptrFromInt(stack_top);
         entry.func = &CoroutineData.entrypointFn;
         entry.context = data;
-
-        // Zero out a safety region below the entry point to ensure DWARF unwinding
-        // sees proper sentinel values instead of garbage when it reads saved registers.
-        // This fixes crashes in Zig 0.16+ where the new DWARF unwinder is more aggressive.
-        // See: https://github.com/ziglang/zig/pull/25227
-        const safety_region_size = 256; // Enough for saved registers and frame metadata
-        const safety_region_start = stack_top -| safety_region_size;
-        if (safety_region_start >= stack_limit) {
-            const region: [*]u8 = @ptrFromInt(safety_region_start);
-            @memset(region[0..safety_region_size], 0);
-        }
 
         // Initialize the context with the entry point
         setupContext(&self.context, stack_top, &coroEntry);
