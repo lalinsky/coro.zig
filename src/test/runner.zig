@@ -9,6 +9,8 @@ pub const std_options = std.Options{
         .{ .scope = .websocket, .level = .warn },
     },
     .logFn = customLogFn,
+    // Disable std.debug's segfault handler to avoid conflicts with stack growth handler
+    .enable_segfault_handler = false,
 };
 
 const std = @import("std");
