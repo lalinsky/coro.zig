@@ -436,9 +436,13 @@ fn coroEntry() callconv(.naked) noreturn {
             }
         },
         .aarch64 => asm volatile (
-            // x30 is already 0 from Context.lr initialization and switchContext restore
-            \\ ldr x0, [sp, #8]
-            \\ ldr x2, [sp]
+            // Create sentinel frame by pushing zeros for FP and LR
+            \\ stp xzr, xzr, [sp, #-16]!
+            // Set FP to point to the sentinel frame, LR to 0
+            \\ mov x29, sp
+            \\ mov x30, xzr
+            // Load function pointer (x2) and context argument (x0) and jump
+            \\ ldp x2, x0, [sp, #16]
             \\ br x2
         ),
         .riscv64 => asm volatile (
