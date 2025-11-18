@@ -312,7 +312,6 @@ pub inline fn switchContext(
               .p15 = true,
               .fpcr = true,
               .fpsr = true,
-              .ffr = true,
               .memory = true,
             }),
         .riscv64 => asm volatile (
@@ -445,7 +444,7 @@ fn coroEntry() callconv(.naked) noreturn {
             // Set FP to point to the sentinel frame
             \\ mov x29, sp
             // Set LR to fake return address
-            \\ mov x30, zxr
+            \\ mov x30, xzr
             // Load function pointer (x2) and context argument (x0) from adjusted offsets
             \\ ldp x2, x0, [sp, #16]
             \\ br x2
