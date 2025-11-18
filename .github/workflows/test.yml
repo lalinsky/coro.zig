@@ -63,7 +63,7 @@ jobs:
       if: matrix.os == 'macos-latest'
       run: |
         set -x
-        ZIG_LIB=$(zig env | grep std_dir | cut -d'"' -f4)
+        ZIG_LIB=$(zig env | grep std_dir | sed 's/.*"\(.*\)".*/\1/')
         echo "Zig std_dir: $ZIG_LIB"
         echo "Applying patch to: $ZIG_LIB/debug/SelfInfo/MachO.zig"
         cd "$ZIG_LIB/debug/SelfInfo"
