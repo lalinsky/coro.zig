@@ -441,21 +441,25 @@ fn coroEntry() callconv(.naked) noreturn {
         .aarch64 => asm volatile (
             // Create sentinel frame by pushing zeros for FP and LR (workaround for bug in Zig 0.16 unwinder)
             \\ stp xzr, xzr, [sp, #-16]!
-            // Set FP to point to the sentinel frame
+            // Set FP to point past the sentinel frame, LR to 0
             \\ mov x29, sp
-            // Set LR to fake return address
             \\ mov x30, xzr
             // Load function pointer (x2) and context argument (x0) from adjusted offsets
             \\ ldp x2, x0, [sp, #16]
             \\ br x2
-            \\1:
         ),
         .riscv64 => asm volatile (
-            \\ lla ra, 1f
-            \\ ld a0, 8(sp)
-            \\ ld t0, 0(sp)
+            // Create sentinel frame by pushing zeros for old FP and old RA
+            \\ addi sp, sp, -16
+            \\ sd zero, 0(sp)
+            \\ sd zero, 8(sp)
+            // Set FP to point to CFA (SP before the push), RA to 0
+            \\ addi s0, sp, 16
+            \\ li ra, 0
+            // Load function pointer (t0) and context argument (a0) and jump
+            \\ ld t0, 16(sp)
+            \\ ld a0, 24(sp)
             \\ jr t0
-            \\1:
         ),
         else => @compileError("unsupported architecture"),
     }
