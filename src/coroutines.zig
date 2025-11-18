@@ -445,7 +445,7 @@ fn coroEntry() callconv(.naked) noreturn {
             // Set FP to point to the sentinel frame
             \\ mov x29, sp
             // Set LR to fake return address
-            \\ adr x30, 1f
+            \\ mov x30, zxr
             // Load function pointer (x2) and context argument (x0) from adjusted offsets
             \\ ldp x2, x0, [sp, #16]
             \\ br x2
