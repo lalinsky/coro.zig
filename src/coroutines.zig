@@ -440,9 +440,14 @@ fn coroEntry() callconv(.naked) noreturn {
             }
         },
         .aarch64 => asm volatile (
+            // Create sentinel frame by pushing zeros for FP and LR (workaround for bug in Zig 0.16 unwinder)
+            \\ stp xzr, xzr, [sp, #-16]!
+            // Set FP to point to the sentinel frame
+            \\ mov x29, sp
+            // Set LR to fake return address
             \\ adr x30, 1f
-            \\ ldr x0, [sp, #8]
-            \\ ldr x2, [sp]
+            // Load function pointer (x2) and context argument (x0) from adjusted offsets
+            \\ ldp x2, x0, [sp, #16]
             \\ br x2
             \\1:
         ),
