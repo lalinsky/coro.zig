@@ -1,0 +1,95 @@
+--- MachO.zig.orig	2025-11-18 08:24:09.121441702 +0100
++++ MachO.zig	2025-11-18 08:28:14.701807276 +0100
+@@ -138,6 +138,7 @@
+     };
+ }
+ fn unwindFrameInner(si: *SelfInfo, gpa: Allocator, context: *UnwindContext) !usize {
++    std.debug.print("[MachO.unwindFrameInner] ENTER: pc=0x{x}\n", .{context.pc});
+     const module = try si.findModule(gpa, context.pc);
+     defer si.mutex.unlock();
+ 
+@@ -266,10 +267,12 @@
+     if (entry.raw_encoding == 0) return error.MissingDebugInfo;
+ 
+     const encoding: macho.CompactUnwindEncoding = @bitCast(entry.raw_encoding);
++    std.debug.print("[MachO.unwindFrameInner] encoding=0x{x}, arch={s}\n", .{ entry.raw_encoding, @tagName(builtin.cpu.arch) });
+     const new_ip = switch (builtin.cpu.arch) {
+         .x86_64 => switch (encoding.mode.x86_64) {
+             .OLD => return error.UnsupportedDebugInfo,
+             .RBP_FRAME => ip: {
++                std.debug.print("[MachO.unwindFrameInner] x86_64 RBP_FRAME\n", .{});
+                 const frame = encoding.value.x86_64.frame;
+ 
+                 const fp = (try dwarfRegNative(&context.cpu_state, fp_reg_num)).*;
+@@ -302,6 +305,7 @@
+             .STACK_IMMD,
+             .STACK_IND,
+             => ip: {
++                std.debug.print("[MachO.unwindFrameInner] x86_64 STACK mode={s}\n", .{@tagName(encoding.mode.x86_64)});
+                 const frameless = encoding.value.x86_64.frameless;
+ 
+                 const sp = (try dwarfRegNative(&context.cpu_state, sp_reg_num)).*;
+@@ -370,6 +374,7 @@
+                 break :ip new_ip;
+             },
+             .DWARF => {
++                std.debug.print("[MachO.unwindFrameInner] x86_64 DWARF\n", .{});
+                 const dwarf = &(unwind.dwarf orelse return error.MissingDebugInfo);
+                 const rules = try context.computeRules(gpa, dwarf, unwind.vmaddr_slide, encoding.value.x86_64.dwarf);
+                 return context.next(gpa, &rules);
+@@ -378,6 +383,7 @@
+         .aarch64 => switch (encoding.mode.arm64) {
+             .OLD => return error.UnsupportedDebugInfo,
+             .FRAMELESS => ip: {
++                std.debug.print("[MachO.unwindFrameInner] ARM64 FRAMELESS\n", .{});
+                 const sp = (try dwarfRegNative(&context.cpu_state, sp_reg_num)).*;
+                 const new_sp = sp + encoding.value.arm64.frameless.stack_size * 16;
+                 const new_ip = (try dwarfRegNative(&context.cpu_state, 30)).*;
+@@ -385,21 +391,27 @@
+                 break :ip new_ip;
+             },
+             .DWARF => {
++                std.debug.print("[MachO.unwindFrameInner] ARM64 DWARF\n", .{});
+                 const dwarf = &(unwind.dwarf orelse return error.MissingDebugInfo);
+                 const rules = try context.computeRules(gpa, dwarf, unwind.vmaddr_slide, encoding.value.arm64.dwarf);
+                 return context.next(gpa, &rules);
+             },
+             .FRAME => ip: {
++                std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME\n", .{});
+                 const frame = encoding.value.arm64.frame;
+ 
+                 const fp = (try dwarfRegNative(&context.cpu_state, fp_reg_num)).*;
++                std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME: fp=0x{x}, ip_ptr=0x{x}\n", .{ fp, fp + @sizeOf(usize) });
+                 const ip_ptr = fp + @sizeOf(usize);
+ 
+                 var reg_addr = fp - @sizeOf(usize);
++                std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME: x_reg_pairs={any}\n", .{frame.x_reg_pairs});
+                 inline for (@typeInfo(@TypeOf(frame.x_reg_pairs)).@"struct".fields, 0..) |field, i| {
+                     if (@field(frame.x_reg_pairs, field.name) != 0) {
++                        std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME: restoring reg pair {}, reading from addr 0x{x}\n", .{ i, reg_addr });
+                         (try dwarfRegNative(&context.cpu_state, 19 + i)).* = @as(*const usize, @ptrFromInt(reg_addr)).*;
+                         reg_addr += @sizeOf(usize);
++                        std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME: restoring reg pair {} (+1), reading from addr 0x{x}\n", .{ i, reg_addr });
+                         (try dwarfRegNative(&context.cpu_state, 20 + i)).* = @as(*const usize, @ptrFromInt(reg_addr)).*;
+                         reg_addr += @sizeOf(usize);
+                     }
+@@ -411,8 +423,11 @@
+                 // If some weird/broken unwind info tells us to read them later, we will fail then.
+                 reg_addr += 16 * @as(usize, @popCount(@as(u4, @bitCast(frame.d_reg_pairs))));
+ 
++                std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME: reading new_ip from addr 0x{x}\n", .{ip_ptr});
+                 const new_ip = @as(*const usize, @ptrFromInt(ip_ptr)).*;
++                std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME: reading new_fp from addr 0x{x}\n", .{fp});
+                 const new_fp = @as(*const usize, @ptrFromInt(fp)).*;
++                std.debug.print("[MachO.unwindFrameInner] ARM64 FRAME: new_ip=0x{x}, new_fp=0x{x}\n", .{ new_ip, new_fp });
+ 
+                 (try dwarfRegNative(&context.cpu_state, fp_reg_num)).* = new_fp;
+                 (try dwarfRegNative(&context.cpu_state, ip_reg_num)).* = new_ip;
+@@ -429,6 +444,7 @@
+     // function's last instruction making `ret_addr` one byte past its end.
+     context.pc = ret_addr -| 1;
+ 
++    std.debug.print("[MachO.unwindFrameInner] EXIT: ret_addr=0x{x}, next_pc=0x{x}\n", .{ ret_addr, context.pc });
+     return ret_addr;
+ }
+ 

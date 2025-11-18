@@ -59,6 +59,17 @@ jobs:
       with:
         version: master
 
+    - name: Apply MachO unwinder debug patch
+      if: matrix.os == 'macos-latest'
+      run: |
+        set -x
+        ZIG_LIB=$(zig env | grep std_dir | cut -d'"' -f4)
+        echo "Zig std_dir: $ZIG_LIB"
+        echo "Applying patch to: $ZIG_LIB/debug/SelfInfo/MachO.zig"
+        cd "$ZIG_LIB/debug/SelfInfo"
+        patch -p0 < ${{ github.workspace }}/macho-unwinder-debug.patch
+        echo "Patch applied successfully"
+
     - name: Build
       run: >
         zig build --release=safe -Dinstall-tests
