@@ -424,6 +424,7 @@ pub inline fn switchContext(
               [new] "{$r5}" (new_context),
             : .{
               .r1 = true,   // ra
+              .r3 = true,   // sp
               .r4 = true,   // a0
               .r5 = true,   // a1
               .r6 = true,   // a2
@@ -441,6 +442,7 @@ pub inline fn switchContext(
               .r18 = true,  // t6
               .r19 = true,  // t7
               .r20 = true,  // t8
+              .r22 = true,  // fp/s9
               .r23 = true,  // s0
               .r24 = true,  // s1
               .r25 = true,  // s2
