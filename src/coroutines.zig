@@ -507,7 +507,7 @@ pub inline fn switchContext(
             \\ 1:
             \\ mflr 5
             \\ mtlr 0
-            \\ addi 5, 5, 44
+            \\ addi 5, 5, 0f - 1b
             \\
             \\ std 1, 0(3)
             \\ std 31, 8(3)
