@@ -52,6 +52,14 @@ pub const Context = switch (builtin.cpu.arch) {
 
         pub const stack_alignment = 16;
     },
+    .powerpc64le => extern struct {
+        sp: u64,   // r1 (stack pointer)
+        fp: u64,   // r31 (frame pointer, by convention)
+        pc: u64,   // saved from LR
+        stack_info: StackInfo,
+
+        pub const stack_alignment = 16;
+    },
     else => |arch| @compileError("unimplemented architecture: " ++ @tagName(arch)),
 };
 
@@ -77,6 +85,11 @@ pub fn setupContext(ctx: *Context, stack_ptr: usize, entry_point: *const EntryPo
             ctx.pc = @intFromPtr(entry_point);
         },
         .loongarch64 => {
+            ctx.sp = stack_ptr;
+            ctx.fp = 0;
+            ctx.pc = @intFromPtr(entry_point);
+        },
+        .powerpc64le => {
             ctx.sp = stack_ptr;
             ctx.fp = 0;
             ctx.pc = @intFromPtr(entry_point);
@@ -486,6 +499,103 @@ pub inline fn switchContext(
               .f31 = true,  // fs7
               .memory = true,
             }),
+        .powerpc64le => asm volatile (
+            // Get address of resume point (label 0f)
+            // bl sets LR = address of next instruction, then jumps to target
+            \\ mflr 0
+            \\ bl 1f
+            \\ 1:
+            \\ mflr 5
+            \\ mtlr 0
+            \\ addi 5, 5, 44
+            \\
+            \\ std 1, 0(3)
+            \\ std 31, 8(3)
+            \\ std 5, 16(3)
+            \\
+            \\ ld 1, 0(4)
+            \\ ld 31, 8(4)
+            \\ ld 5, 16(4)
+            \\ mtctr 5
+            \\ bctr
+            \\ 0:
+            :
+            : [current] "{r3}" (current_context_param),
+              [new] "{r4}" (new_context),
+            : .{
+              .r0 = true,
+              .r3 = true,
+              .r4 = true,
+              .r5 = true,
+              .r6 = true,
+              .r7 = true,
+              .r8 = true,
+              .r9 = true,
+              .r10 = true,
+              .r11 = true,
+              .r12 = true,
+              .r14 = true,
+              .r15 = true,
+              .r16 = true,
+              .r17 = true,
+              .r18 = true,
+              .r19 = true,
+              .r20 = true,
+              .r21 = true,
+              .r22 = true,
+              .r23 = true,
+              .r24 = true,
+              .r25 = true,
+              .r26 = true,
+              .r27 = true,
+              .r28 = true,
+              .r29 = true,
+              .r30 = true,
+              .r31 = true,
+              .ctr = true,
+              .lr = true,
+              .cr0 = true,
+              .cr1 = true,
+              .cr2 = true,
+              .cr3 = true,
+              .cr4 = true,
+              .cr5 = true,
+              .cr6 = true,
+              .cr7 = true,
+              .f0 = true,
+              .f1 = true,
+              .f2 = true,
+              .f3 = true,
+              .f4 = true,
+              .f5 = true,
+              .f6 = true,
+              .f7 = true,
+              .f8 = true,
+              .f9 = true,
+              .f10 = true,
+              .f11 = true,
+              .f12 = true,
+              .f13 = true,
+              .f14 = true,
+              .f15 = true,
+              .f16 = true,
+              .f17 = true,
+              .f18 = true,
+              .f19 = true,
+              .f20 = true,
+              .f21 = true,
+              .f22 = true,
+              .f23 = true,
+              .f24 = true,
+              .f25 = true,
+              .f26 = true,
+              .f27 = true,
+              .f28 = true,
+              .f29 = true,
+              .f30 = true,
+              .f31 = true,
+              .memory = true,
+            }),
         else => @compileError("unsupported architecture"),
     }
 }
@@ -550,6 +660,17 @@ fn coroEntry() callconv(.naked) noreturn {
             \\ ld.d $t0, $sp, 0
             \\ jr $t0
             \\1:
+        ),
+        .powerpc64le => asm volatile (
+            // bl sets LR = address of next instruction (0:), then jumps to 1f
+            // This gives us the sentinel address in LR for stack traces
+            \\ bl 1f
+            \\0:
+            \\1:
+            \\ ld 3, 8(1)
+            \\ ld 5, 0(1)
+            \\ mtctr 5
+            \\ bctr
         ),
         else => @compileError("unsupported architecture"),
     }
