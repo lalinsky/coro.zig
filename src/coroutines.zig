@@ -500,8 +500,11 @@ pub inline fn switchContext(
               .memory = true,
             }),
         .powerpc64le => asm volatile (
-            // Save LR as resume point (like Boost.Context)
+            // Get address of resume label (0f) - can't use LR since we're inline
+            \\ bcl 20, 31, .+4
             \\ mflr 5
+            \\ addi 5, 5, 0f - . + 4
+            \\
             \\ std 1, 0(3)
             \\ std 31, 8(3)
             \\ std 5, 16(3)
@@ -509,8 +512,9 @@ pub inline fn switchContext(
             \\ ld 1, 0(4)
             \\ ld 31, 8(4)
             \\ ld 5, 16(4)
-            \\ mtlr 5
-            \\ blr
+            \\ mtctr 5
+            \\ bctr
+            \\ 0:
             :
             : [current] "{r3}" (current_context_param),
               [new] "{r4}" (new_context),
