@@ -500,15 +500,8 @@ pub inline fn switchContext(
               .memory = true,
             }),
         .powerpc64le => asm volatile (
-            // Get address of resume point (label 0f)
-            // PowerPC has no "load local address" pseudo-op like RISC-V's lla,
-            // so we use bl/mflr to get PC-relative address
-            \\ mflr 0
-            \\ bcl 20, 31, .+4
+            // Save LR as resume point (like Boost.Context)
             \\ mflr 5
-            \\ mtlr 0
-            \\ addi 5, 5, 0f - . + 4
-            \\
             \\ std 1, 0(3)
             \\ std 31, 8(3)
             \\ std 5, 16(3)
@@ -516,9 +509,8 @@ pub inline fn switchContext(
             \\ ld 1, 0(4)
             \\ ld 31, 8(4)
             \\ ld 5, 16(4)
-            \\ mtctr 5
-            \\ bctr
-            \\ 0:
+            \\ mtlr 5
+            \\ blr
             :
             : [current] "{r3}" (current_context_param),
               [new] "{r4}" (new_context),
