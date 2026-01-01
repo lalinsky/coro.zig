@@ -501,13 +501,13 @@ pub inline fn switchContext(
             }),
         .powerpc64le => asm volatile (
             // Get address of resume point (label 0f)
-            // bl sets LR = address of next instruction, then jumps to target
+            // PowerPC has no "load local address" pseudo-op like RISC-V's lla,
+            // so we use bl/mflr to get PC-relative address
             \\ mflr 0
-            \\ bl 1f
-            \\ 1:
+            \\ bcl 20, 31, .+4
             \\ mflr 5
             \\ mtlr 0
-            \\ addi 5, 5, 0f - 1b
+            \\ addi 5, 5, 0f - . + 4
             \\
             \\ std 1, 0(3)
             \\ std 31, 8(3)
